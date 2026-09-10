@@ -1,0 +1,378 @@
+import json
+import hashlib
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+EMBEDDINGS_FILE = (
+    "/opt/ai/rag/database/embeddings.json"
+)
+
+QDRANT_URL = (
+    "http://localhost:6333"
+)
+
+COLLECTION_NAME = (
+    "rag_documents"
+)
+
+
+# ============================================================
+# ID DETERMINÍSTICO
+# ============================================================
+
+def generate_qdrant_id(chunk_id):
+
+    """
+    Converte o chunk_id em um ID inteiro estável.
+
+    O mesmo chunk_id SEMPRE produzirá o mesmo
+    ID no Qdrant.
+    """
+
+    value = int(
+        hashlib.sha256(
+            chunk_id.encode("utf-8")
+        ).hexdigest()[:16],
+        16
+    )
+
+    return value & 0x7FFFFFFFFFFFFFFF
+
+
+# ============================================================
+# CARREGA IDS DO QDRANT
+# ============================================================
+
+def get_qdrant_ids(client):
+
+    ids = set()
+
+    offset = None
+
+    while True:
+
+        records, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=1000,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+
+        for record in records:
+
+            ids.add(record.id)
+
+        if offset is None:
+            break
+
+    return ids
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 80)
+    print("MIGRAÇÃO INCREMENTAL PARA QDRANT")
+    print("=" * 80)
+
+    # --------------------------------------------------------
+    # Carrega embeddings
+    # --------------------------------------------------------
+
+    print()
+    print("Carregando embeddings...")
+
+    with open(
+        EMBEDDINGS_FILE,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        data = json.load(f)
+
+    print(
+        f"Embeddings encontrados: {len(data)}"
+    )
+
+    # --------------------------------------------------------
+    # Conecta
+    # --------------------------------------------------------
+
+    client = QdrantClient(
+        url=QDRANT_URL
+    )
+
+    collection_info = client.get_collection(
+        COLLECTION_NAME
+    )
+
+    print()
+    print(
+        f"Points atualmente no Qdrant: "
+        f"{collection_info.points_count}"
+    )
+
+    # --------------------------------------------------------
+    # Prepara pontos atuais
+    # --------------------------------------------------------
+
+    points = []
+
+    expected_ids = set()
+
+    documentos = set()
+
+    for item in data:
+
+        chunk_id = item.get(
+            "chunk_id"
+        )
+
+        if not chunk_id:
+
+            raise ValueError(
+                "Encontrado embedding sem "
+                "chunk_id.\n"
+                f"Documento: {item.get('document')}\n"
+                f"Página: {item.get('page')}\n"
+                f"Chunk: {item.get('chunk')}\n\n"
+                "O embeddings.json precisa ser "
+                "gerado pelo novo embed.py."
+            )
+
+        qdrant_id = generate_qdrant_id(
+            chunk_id
+        )
+
+        expected_ids.add(
+            qdrant_id
+        )
+
+        documentos.add(
+            item["document"]
+        )
+
+        points.append(
+            PointStruct(
+
+                id=qdrant_id,
+
+                vector=item["embedding"],
+
+                payload={
+
+                    "chunk_id": chunk_id,
+
+                    "document": item["document"],
+
+                    "file_hash": item.get(
+                        "file_hash"
+                    ),
+
+                    "page": item["page"],
+
+                    "chunk": item["chunk"],
+
+                    "text": item["text"],
+                },
+            )
+        )
+
+    # --------------------------------------------------------
+    # IDs atuais no Qdrant
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Lendo IDs existentes no Qdrant..."
+    )
+
+    existing_ids = get_qdrant_ids(
+        client
+    )
+
+    print(
+        f"IDs existentes: {len(existing_ids)}"
+    )
+
+    # --------------------------------------------------------
+    # Calcula diferenças
+    # --------------------------------------------------------
+
+    novos_ids = (
+        expected_ids
+        - existing_ids
+    )
+
+    ids_obsoletos = (
+        existing_ids
+        - expected_ids
+    )
+
+    existentes = (
+        expected_ids
+        & existing_ids
+    )
+
+    print()
+    print("=" * 80)
+    print("ANÁLISE")
+    print("=" * 80)
+
+    print(
+        f"Embeddings no arquivo : {len(data)}"
+    )
+
+    print(
+        f"IDs esperados         : "
+        f"{len(expected_ids)}"
+    )
+
+    print(
+        f"Já existentes         : "
+        f"{len(existentes)}"
+    )
+
+    print(
+        f"Novos                 : "
+        f"{len(novos_ids)}"
+    )
+
+    print(
+        f"Obsoletos              : "
+        f"{len(ids_obsoletos)}"
+    )
+
+    # --------------------------------------------------------
+    # Inserção / atualização
+    # --------------------------------------------------------
+
+    if points:
+
+        print()
+        print(
+            f"Sincronizando {len(points)} "
+            f"pontos..."
+        )
+
+        client.upsert(
+            collection_name=COLLECTION_NAME,
+            points=points,
+            wait=True,
+        )
+
+        print(
+            "Sincronização concluída."
+        )
+
+    else:
+
+        print(
+            "Nenhum ponto para sincronizar."
+        )
+
+    # --------------------------------------------------------
+    # Remove pontos obsoletos
+    # --------------------------------------------------------
+
+    if ids_obsoletos:
+
+        print()
+        print(
+            f"Removendo {len(ids_obsoletos)} "
+            f"pontos obsoletos..."
+        )
+
+        ids_obsoletos = list(
+            ids_obsoletos
+        )
+
+        batch_size = 500
+
+        for i in range(
+            0,
+            len(ids_obsoletos),
+            batch_size
+        ):
+
+            batch = ids_obsoletos[
+                i:i + batch_size
+            ]
+
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=batch,
+                wait=True,
+            )
+
+            print(
+                f"  Removidos "
+                f"{i + len(batch)} / "
+                f"{len(ids_obsoletos)}"
+            )
+
+        print(
+            "Pontos obsoletos removidos."
+        )
+
+    else:
+
+        print()
+        print(
+            "Nenhum ponto obsoleto."
+        )
+
+    # --------------------------------------------------------
+    # Estado final
+    # --------------------------------------------------------
+
+    info = client.get_collection(
+        COLLECTION_NAME
+    )
+
+    print()
+    print("=" * 80)
+    print("MIGRAÇÃO CONCLUÍDA")
+    print("=" * 80)
+
+    print(
+        f"Embeddings          : {len(data)}"
+    )
+
+    print(
+        f"Documentos           : {len(documentos)}"
+    )
+
+    print(
+        f"Novos                : {len(novos_ids)}"
+    )
+
+    print(
+        f"Já existentes        : {len(existentes)}"
+    )
+
+    print(
+        f"Obsoletos removidos  : "
+        f"{len(ids_obsoletos)}"
+    )
+
+    print(
+        f"Points no Qdrant     : "
+        f"{info.points_count}"
+    )
+
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

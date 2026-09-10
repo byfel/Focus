@@ -1,0 +1,39 @@
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from rag.pipeline import ask
+
+
+app = FastAPI(
+    title="SUPORTE AI RAG",
+    description="Assistente técnico baseado em documentação de suporte técnico",
+    version="1.0.0"
+)
+
+
+class Question(BaseModel):
+    question: str
+
+
+@app.get("/")
+def root():
+    return FileResponse("/opt/ai/rag/web/index.html")
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok"
+    }
+
+
+@app.post("/ask")
+def ask_question(request: Question):
+
+    answer = ask(request.question)
+
+    return {
+        "question": request.question,
+        "answer": answer
+    }

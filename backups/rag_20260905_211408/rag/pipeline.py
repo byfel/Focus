@@ -1,0 +1,71 @@
+from .retriever import retrieve
+from .generator import generate_answer
+
+
+# ============================================================
+# MODELOS DISPONÍVEIS
+# ============================================================
+
+SUPPORTED_MODELS = [
+    "gemma4:26b-a4b-it-q4_K_M",
+    "qwen3.6:27b",
+    "qwen3.6:35b",
+    "gemma4:12b",
+    "gemma4:e4b",
+    "gemma3:12b",
+    "gemma3:4b",
+]
+
+DEFAULT_MODEL = "gemma4:12b"
+
+
+# ============================================================
+# RAG
+# ============================================================
+
+def ask(query, model=DEFAULT_MODEL):
+
+    if model not in SUPPORTED_MODELS:
+
+        raise ValueError(
+            f"Modelo não suportado: {model}"
+        )
+
+    results = retrieve(query)
+
+    if not results:
+
+        return {
+            "answer": (
+                "Essa informação não foi encontrada "
+                "na documentação fornecida."
+            ),
+            "sources": []
+        }
+
+    answer = generate_answer(
+        query,
+        results,
+        model
+    )
+
+    sources = []
+
+    for result in results:
+
+        chunk = result["chunk"]
+
+        sources.append({
+            "document": chunk.get("document"),
+            "page": chunk.get("page"),
+            "chunk": chunk.get("chunk"),
+            "score": round(
+                result["score"],
+                4
+            )
+        })
+
+    return {
+        "answer": answer,
+        "sources": sources
+    }

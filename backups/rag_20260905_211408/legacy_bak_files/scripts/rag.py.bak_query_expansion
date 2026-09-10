@@ -1,0 +1,644 @@
+import os
+import sys
+import argparse
+import requests
+
+from collections import defaultdict
+from qdrant_client import QdrantClient
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+OLLAMA_URL = os.getenv(
+    "RAG_OLLAMA_URL",
+    "http://localhost:11434"
+)
+
+EMBED_MODEL = os.getenv(
+    "RAG_EMBED_MODEL",
+    "embeddinggemma:latest"
+)
+
+QDRANT_URL = os.getenv(
+    "RAG_QDRANT_URL",
+    "http://localhost:6333"
+)
+
+COLLECTION = os.getenv(
+    "RAG_COLLECTION",
+    "rag_documents"
+)
+
+TOP_K = int(
+    os.getenv("RAG_TOP_K", "12")
+)
+
+FINAL_CONTEXTS = int(
+    os.getenv("RAG_FINAL_CONTEXTS", "10")
+)
+
+THRESHOLD = float(
+    os.getenv("RAG_THRESHOLD", "0.25")
+)
+
+MIN_DOMINANCE_RATIO = float(
+    os.getenv("RAG_DOMINANCE", "0.60")
+)
+
+TIMEOUT = int(
+    os.getenv("RAG_TIMEOUT", "900")
+)
+
+
+# ============================================================
+# MODELOS DISPONÍVEIS
+# ============================================================
+
+SUPPORTED_MODELS = [
+    "gemma4:26b-a4b-it-q4_K_M",
+    "qwen3.6:27b",
+    "qwen3.6:35b",
+    "gemma4:12b",
+    "gemma4:e4b",
+    "gemma3:12b",
+    "gemma3:4b",
+]
+
+
+DEFAULT_MODEL = "gemma3:12b"
+
+
+# ============================================================
+# EMBEDDING
+# ============================================================
+
+def create_embedding(question):
+
+    print("Gerando embedding...")
+    print(f"Modelo: {EMBED_MODEL}")
+
+    response = requests.post(
+        f"{OLLAMA_URL}/api/embed",
+        json={
+            "model": EMBED_MODEL,
+            "input": question
+        },
+        timeout=300
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    embedding = data["embeddings"][0]
+
+    print(f"Embedding: {len(embedding)} dimensões")
+    print()
+
+    return embedding
+
+
+# ============================================================
+# QDRANT
+# ============================================================
+
+def search_qdrant(embedding):
+
+    print("Consultando Qdrant...")
+    print(f"Coleção: {COLLECTION}")
+    print()
+
+    client = QdrantClient(
+        url=QDRANT_URL
+    )
+
+    result = client.query_points(
+        collection_name=COLLECTION,
+        query=embedding,
+        limit=TOP_K,
+        with_payload=True
+    )
+
+    candidates = []
+
+    for point in result.points:
+
+        if point.score < THRESHOLD:
+            continue
+
+        payload = point.payload or {}
+
+        candidates.append({
+            "id": point.id,
+            "score": float(point.score),
+            "document": payload.get(
+                "document",
+                "desconhecido"
+            ),
+            "page": payload.get(
+                "page",
+                "?"
+            ),
+            "chunk": payload.get(
+                "chunk",
+                "?"
+            ),
+            "text": payload.get(
+                "text",
+                ""
+            )
+        })
+
+    return candidates
+
+
+# ============================================================
+# SELEÇÃO POR DOCUMENTO
+# ============================================================
+
+def select_contexts(candidates, debug=False):
+
+    if not candidates:
+        return []
+
+    groups = defaultdict(list)
+
+    for item in candidates:
+        groups[item["document"]].append(item)
+
+    dominant_document = max(
+        groups,
+        key=lambda document: (
+            len(groups[document]),
+            max(
+                item["score"]
+                for item in groups[document]
+            )
+        )
+    )
+
+    dominant_items = groups[
+        dominant_document
+    ]
+
+    dominance_ratio = (
+        len(dominant_items)
+        /
+        len(candidates)
+    )
+
+    if debug:
+
+        print("=" * 80)
+        print("CANDIDATOS RECUPERADOS")
+        print("=" * 80)
+
+        for i, item in enumerate(
+            candidates,
+            1
+        ):
+
+            print(
+                f"{i}. "
+                f"Score={item['score']:.4f} | "
+                f"{item['document']} | "
+                f"Página={item['page']} | "
+                f"Chunk={item['chunk']}"
+            )
+
+        print()
+
+        print(
+            f"Documento dominante: "
+            f"{dominant_document}"
+        )
+
+        print(
+            f"Dominância: "
+            f"{dominance_ratio:.2%}"
+        )
+
+        print()
+
+    if dominance_ratio >= MIN_DOMINANCE_RATIO:
+
+        selected = dominant_items
+
+    else:
+
+        selected = candidates
+
+    selected = sorted(
+        selected,
+        key=lambda item: item["score"],
+        reverse=True
+    )
+
+    selected = selected[
+        :FINAL_CONTEXTS
+    ]
+
+    if debug:
+
+        print("=" * 80)
+        print("CONTEXTOS SELECIONADOS")
+        print("=" * 80)
+
+        for i, item in enumerate(
+            selected,
+            1
+        ):
+
+            print(
+                f"{i}. "
+                f"Score={item['score']:.4f} | "
+                f"{item['document']} | "
+                f"Página={item['page']} | "
+                f"Chunk={item['chunk']}"
+            )
+
+        print()
+
+    return selected
+
+
+# ============================================================
+# CONTEXTO
+# ============================================================
+
+def build_context(contexts):
+
+    if not contexts:
+        return ""
+
+    parts = []
+
+    for index, item in enumerate(
+        contexts,
+        start=1
+    ):
+
+        parts.append(
+            f"""
+--- CONTEXTO {index} ---
+
+Documento: {item['document']}
+Página: {item['page']}
+Chunk: {item['chunk']}
+
+{item['text']}
+"""
+        )
+
+    return "\n".join(parts)
+
+
+# ============================================================
+# GERAR RESPOSTA
+# ============================================================
+
+def generate_answer(
+    question,
+    context,
+    llm_model,
+    debug=False
+):
+
+    if not context:
+
+        return (
+            "Essa informação não foi encontrada "
+            "na documentação fornecida."
+        )
+
+    system_prompt = """
+Você é um assistente técnico especializado em Autodesk Flame,
+Linux, PCoIP e sistemas de mídia.
+
+Responda em português.
+
+Use SOMENTE as informações presentes no CONTEXTO.
+
+REGRAS:
+
+1. Não invente informações.
+
+2. Não invente comandos.
+
+3. Não use conhecimento externo.
+
+4. Preserve exatamente comandos e nomes de opções
+   apresentados no contexto.
+
+5. Se a informação não estiver no contexto, diga:
+   "Essa informação não foi encontrada na documentação fornecida."
+
+6. Seja objetivo e técnico.
+
+7. Quando possível, informe documento e página.
+
+8. Não atribua informações a uma página diferente
+   daquela apresentada no contexto.
+
+9. Não repita informações desnecessariamente.
+
+10. Responda diretamente à pergunta.
+"""
+
+    prompt = f"""
+{system_prompt}
+
+CONTEXTO:
+
+{context}
+
+PERGUNTA:
+
+{question}
+
+RESPOSTA:
+"""
+
+    if debug:
+
+        print("=" * 80)
+        print("DIAGNÓSTICO DO CONTEXTO")
+        print("=" * 80)
+
+        print(
+            f"Caracteres do contexto: "
+            f"{len(context)}"
+        )
+
+        print(
+            f"Caracteres do prompt: "
+            f"{len(prompt)}"
+        )
+
+        print()
+
+        print("=" * 80)
+        print("GERANDO RESPOSTA")
+        print("=" * 80)
+        print()
+
+        print(
+            f"Modelo LLM: {llm_model}"
+        )
+
+        print(
+            f"Tamanho do contexto: "
+            f"{len(context)} caracteres"
+        )
+
+        print(
+            f"Tamanho do prompt: "
+            f"{len(prompt)} caracteres"
+        )
+
+        print()
+
+        print("DEBUG")
+        print("-" * 80)
+
+        print(
+            f"OLLAMA URL: {OLLAMA_URL}"
+        )
+
+        print(
+            f"Modelo: {llm_model}"
+        )
+
+        print(
+            f"Timeout: {TIMEOUT} segundos"
+        )
+
+        print("-" * 80)
+
+    try:
+
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": llm_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1
+                }
+            },
+            timeout=TIMEOUT
+        )
+
+        response.raise_for_status()
+
+    except requests.exceptions.RequestException as e:
+
+        print()
+        print("=" * 80)
+        print("ERRO DE COMUNICAÇÃO COM OLLAMA")
+        print("=" * 80)
+        print()
+        print(e)
+        print()
+
+        return None
+
+    data = response.json()
+
+    if debug:
+
+        print("Resposta recebida do Ollama.")
+
+        print(
+            f"done: {data.get('done')}"
+        )
+
+        print(
+            f"done_reason: "
+            f"{data.get('done_reason')}"
+        )
+
+        if data.get("total_duration"):
+
+            print(
+                f"total_duration: "
+                f"{data['total_duration'] / 1e9:.2f}s"
+            )
+
+        if data.get("prompt_eval_count"):
+
+            print(
+                f"prompt_eval_count: "
+                f"{data['prompt_eval_count']}"
+            )
+
+        if data.get("eval_count"):
+
+            print(
+                f"eval_count: "
+                f"{data['eval_count']}"
+            )
+
+        print()
+
+    return data.get(
+        "response",
+        ""
+    ).strip()
+
+
+# ============================================================
+# RAG
+# ============================================================
+
+def ask(
+    question,
+    llm_model,
+    debug=False
+):
+
+    if llm_model not in SUPPORTED_MODELS:
+
+        raise ValueError(
+            f"Modelo não suportado: {llm_model}"
+        )
+
+    print(
+        f"Embedding: {EMBED_MODEL}"
+    )
+
+    print(
+        f"LLM: {llm_model}"
+    )
+
+    print(
+        f"Qdrant: {COLLECTION}"
+    )
+
+    print()
+
+    embedding = create_embedding(
+        question
+    )
+
+    candidates = search_qdrant(
+        embedding
+    )
+
+    contexts = select_contexts(
+        candidates,
+        debug=debug
+    )
+
+    context = build_context(
+        contexts
+    )
+
+    answer = generate_answer(
+        question,
+        context,
+        llm_model,
+        debug=debug
+    )
+
+    return {
+        "question": question,
+        "answer": answer,
+        "model": llm_model,
+        "embedding_model": EMBED_MODEL,
+        "collection": COLLECTION,
+        "candidates": candidates,
+        "contexts": contexts
+    }
+
+
+# ============================================================
+# ARGUMENTOS
+# ============================================================
+
+def parse_arguments():
+
+    parser = argparse.ArgumentParser(
+        description="RAG com Ollama + Qdrant"
+    )
+
+    parser.add_argument(
+        "question",
+        nargs="+",
+        help="Pergunta para o RAG"
+    )
+
+    parser.add_argument(
+        "--model",
+        "-m",
+        default=DEFAULT_MODEL,
+        choices=SUPPORTED_MODELS,
+        help=(
+            "Modelo LLM a utilizar "
+            f"(padrão: {DEFAULT_MODEL})"
+        )
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Exibe informações de diagnóstico"
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    args = parse_arguments()
+
+    question = " ".join(
+        args.question
+    )
+
+    try:
+
+        result = ask(
+            question=question,
+            llm_model=args.model,
+            debug=args.debug
+        )
+
+    except Exception as e:
+
+        print()
+        print("=" * 80)
+        print("ERRO")
+        print("=" * 80)
+        print()
+        print(
+            type(e).__name__
+        )
+        print(e)
+        print()
+        sys.exit(1)
+
+    if result["answer"] is None:
+
+        sys.exit(1)
+
+    print("=" * 80)
+    print("RESPOSTA")
+    print("=" * 80)
+    print()
+
+    print(
+        result["answer"]
+    )
+
+
+if __name__ == "__main__":
+
+    main()

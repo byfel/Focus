@@ -1,0 +1,10 @@
+{
+  "image": "logagem_img_5_p3.png",
+  "model": "gemma3:4b",
+  "elapsed_seconds": 42.11,
+  "eval_count": 246,
+  "prompt_eval_count": 404,
+  "total_duration_ns": 42105372471,
+  "load_duration_ns": 1237748078,
+  "content": "*   **Software/Sistema:** Media Central (provavelmente um sistema de indexação ou monitoramento)\n*   **Título da Janela:** Nova mídia\n*   **Menu:** Feed - EXTERNA-1\n*   **Botão:**  \"Salvar\" (verde)\n*   **Botão:** \"Cancelar\" (cinza)\n*   **Campo/Opção:** Início do Time code\\*\n*   **Data:** 27/08/2026 18:33\n*   **Valor da Identificação Única:** 060a2b340101010101010f0013-000000-r3300ca95fe0083-57a51ff88253-8145\n*   **Texto da Instrução:** 1. Clicar no botão para salvar e aguardar alguns minutos para os markers aparecerem no Media Central.\n*   **Marcação/Sequência de Ações:** Setas indicam o clique do botão “Salvar”."
+}

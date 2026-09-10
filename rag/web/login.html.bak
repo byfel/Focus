@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+
+<html lang="pt-BR">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>SUPORTE AI</title>
+
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+
+body {
+
+    margin: 0;
+
+    min-height: 100vh;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+
+    background:
+        radial-gradient(
+            circle at top,
+            #1d2939,
+            #090b0f 60%
+        );
+
+    color: #eee;
+
+}
+
+
+.login-container {
+
+    width: 100%;
+
+    max-width: 420px;
+
+    padding: 20px;
+
+}
+
+
+.login-box {
+
+    background: rgba(
+        24,
+        27,
+        32,
+        0.96
+    );
+
+    border: 1px solid #333;
+
+    border-radius: 12px;
+
+    padding: 40px;
+
+    box-shadow:
+        0 20px 60px
+        rgba(0,0,0,.5);
+
+}
+
+
+.logo {
+
+    text-align: center;
+
+    margin-bottom: 35px;
+
+}
+
+
+.logo-title {
+
+    font-size: 28px;
+
+    font-weight: bold;
+
+    letter-spacing: 2px;
+
+}
+
+
+.logo-subtitle {
+
+    margin-top: 8px;
+
+    color: #888;
+
+    font-size: 14px;
+
+}
+
+
+label {
+
+    display: block;
+
+    margin-bottom: 8px;
+
+    color: #bbb;
+
+    font-size: 14px;
+
+}
+
+
+input {
+
+    width: 100%;
+
+    padding: 13px;
+
+    margin-bottom: 20px;
+
+    background: #111;
+
+    border: 1px solid #3a3a3a;
+
+    border-radius: 6px;
+
+    color: white;
+
+    font-size: 15px;
+
+    outline: none;
+
+}
+
+
+input:focus {
+
+    border-color: #3b82f6;
+
+}
+
+
+button {
+
+    width: 100%;
+
+    padding: 13px;
+
+    margin-top: 5px;
+
+    background: #2563eb;
+
+    border: none;
+
+    border-radius: 6px;
+
+    color: white;
+
+    font-size: 15px;
+
+    font-weight: bold;
+
+    cursor: pointer;
+
+}
+
+
+button:hover {
+
+    background: #1d4ed8;
+
+}
+
+
+button:disabled {
+
+    background: #555;
+
+    cursor: wait;
+
+}
+
+
+.error {
+
+    display: none;
+
+    margin-bottom: 20px;
+
+    padding: 12px;
+
+    background: #3b1717;
+
+    border: 1px solid #6b2929;
+
+    border-radius: 6px;
+
+    color: #ff9b9b;
+
+    font-size: 14px;
+
+}
+
+
+.footer {
+
+    text-align: center;
+
+    margin-top: 25px;
+
+    color: #666;
+
+    font-size: 12px;
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div class="login-container">
+
+
+<div class="login-box">
+
+
+<div class="logo">
+
+<div class="logo-title">
+
+SUPORTE AI
+
+</div>
+
+
+<div class="logo-subtitle">
+
+Assistente Técnico
+
+</div>
+
+</div>
+
+
+<div
+    id="error"
+    class="error"
+></div>
+
+
+<form
+    id="loginForm"
+>
+
+
+<label for="username">
+
+Usuário corporativo
+
+</label>
+
+
+<input
+    id="username"
+    type="text"
+    autocomplete="username"
+    placeholder="Digite seu usuário"
+    required
+>
+
+
+<label for="password">
+
+Senha
+
+</label>
+
+
+<input
+    id="password"
+    type="password"
+    autocomplete="current-password"
+    placeholder="Digite sua senha"
+    required
+>
+
+
+<button
+    id="loginButton"
+    type="submit"
+>
+
+ENTRAR
+
+</button>
+
+
+</form>
+
+
+<div class="footer">
+
+Autenticação corporativa
+
+</div>
+
+
+</div>
+
+</div>
+
+
+<script>
+
+
+const form =
+    document.getElementById(
+        "loginForm"
+    );
+
+
+const button =
+    document.getElementById(
+        "loginButton"
+    );
+
+
+const error =
+    document.getElementById(
+        "error"
+    );
+
+
+form.addEventListener(
+    "submit",
+    async function(event) {
+
+        event.preventDefault();
+
+
+        const username =
+            document
+                .getElementById(
+                    "username"
+                )
+                .value
+                .trim();
+
+
+        const password =
+            document
+                .getElementById(
+                    "password"
+                )
+                .value;
+
+
+        error.style.display =
+            "none";
+
+
+        button.disabled =
+            true;
+
+
+        button.textContent =
+            "AUTENTICANDO...";
+
+
+        try {
+
+
+            const response =
+                await fetch(
+                    "/login",
+                    {
+
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+
+                        body:
+                            JSON.stringify({
+                                username,
+                                password
+                            })
+
+                    }
+                );
+
+
+            const data =
+                await response.json();
+
+
+            if (!response.ok) {
+
+                throw new Error(
+                    data.detail ||
+                    "Falha na autenticação."
+                );
+
+            }
+
+
+            window.location.href =
+                "/app";
+
+
+        } catch (err) {
+
+
+            error.textContent =
+                err.message;
+
+
+            error.style.display =
+                "block";
+
+
+        } finally {
+
+
+            button.disabled =
+                false;
+
+
+            button.textContent =
+                "ENTRAR";
+
+        }
+
+    }
+);
+
+</script>
+
+
+</body>
+
+</html>

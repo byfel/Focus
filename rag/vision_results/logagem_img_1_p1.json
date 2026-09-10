@@ -1,0 +1,10 @@
+{
+  "image": "logagem_img_1_p1.png",
+  "model": "gemma3:4b",
+  "elapsed_seconds": 62.76,
+  "eval_count": 600,
+  "prompt_eval_count": 404,
+  "total_duration_ns": 62757010967,
+  "load_duration_ns": 10131628412,
+  "content": "*   **Software/Sistema:** Logger (nome da interface)\n*   **Menus e Botões:**\n    *   Loggear (Menu principal)\n    *   Edição (Submenu dentro de Loggear)\n    *   Administração (Submenu dentro de Loggear)\n    *   \"Nova Mídia\" (Botão/Link para acessar a nova mídia)\n    *   \"CRIAR NOVA MÍDIA\" (Botão na interface principal)\n*   **Campos e Opções:**\n    *   Logs (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Sessões (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Importações (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Mídias (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Vídeo\n    *   Usuário\n*   **Nomes, Textos e Valores Visíveis:**\n    *   \"1. Acessar Administração.\" (Marcação 1 – Texto da anotação)\n    *   \"2. Gestão de Logs\" (Título do menu/seção)\n    *   \"3. Mídias\" (Título do menu/seção)\n    *   \"4. Nova Mídia\" (Título do menu/seção)\n    *   \"ESDC 26\" (Logotipo/Identificação do sistema - provavelmente, uma versão de um software)\n    *   \"Marcos Frias De Meneses\" (Nome do usuário) – \"marcosfrias.globo\" (e-mail associado)\n    *   Datas: 19/21/04, 28/08/2026, 20/19/56, 28/08/2026, 20/19/42, 19/24/08, 19/12/17, 28/08/2026, 20/19/40, 19/36/33, 28/08/2026, 20/19/37, 28/08/2026, 20/19/55, 28/08/2026, 20/19/57\n*   **Procedimento Demonstrado:** Acesso à tela de Administração. Indicação de como acessar a área de \"Nova Mídia\".\n*   **Sequência de Ações Indicadas pelas Marcações:**\n"
+}

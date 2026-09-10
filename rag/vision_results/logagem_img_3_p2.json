@@ -1,0 +1,10 @@
+{
+  "image": "logagem_img_3_p2.png",
+  "model": "gemma3:4b",
+  "elapsed_seconds": 45.92,
+  "eval_count": 331,
+  "prompt_eval_count": 404,
+  "total_duration_ns": 45918959055,
+  "load_duration_ns": 1108398765,
+  "content": "*   **Software/Sistema:** RAG (presumivelmente, a interface para indexação de mídia)\n*   **Título da Janela Modal:** Nova mídia\n*   **Mensagem Principal:** 1. Selecionar o Feed que foi usado na loggagem.\n*   **Menu Dropdown \"Feed\":** EXTERNA-1\n*   **Campo \"Início do Time code\":** 27/08/2026 18:33\n*   **Botão \"Iniciar do Time code\":**  (Ícone de relógio)\n*   **Campo \"Adicionar nova MídiaID\":** 060a2b3401010101010f0013-000000-f3300ca95fe f0083-57a51ff88253-8145\n*   **Botão \"Adicionar\":** (+)\n*   **Texto abaixo do campo MídiaID:** Nenhum MídialD associada...\n*   **Botão \"Cancelar\":** CANCELAR\n*   **Botão \"Salvar\":** SALVAR\n*   **Procedimento Demonstrado:** Selecionar um Feed (EXTERNAL-1) e adicionar uma nova MídiaID.\n*   **Sequência de Ações:** O usuário seleciona o valor dropdown \"EXTERNA-1\", insere o valor da MídialD, e clica no botão \"+\"."
+}

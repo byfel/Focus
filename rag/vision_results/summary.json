@@ -1,0 +1,58 @@
+{
+  "model": "gemma3:4b",
+  "num_images": 5,
+  "num_predict": 600,
+  "total_elapsed_seconds": 243.36,
+  "results": [
+    {
+      "image": "logagem_img_1_p1.png",
+      "model": "gemma3:4b",
+      "elapsed_seconds": 62.76,
+      "eval_count": 600,
+      "prompt_eval_count": 404,
+      "total_duration_ns": 62757010967,
+      "load_duration_ns": 10131628412,
+      "content": "*   **Software/Sistema:** Logger (nome da interface)\n*   **Menus e Botões:**\n    *   Loggear (Menu principal)\n    *   Edição (Submenu dentro de Loggear)\n    *   Administração (Submenu dentro de Loggear)\n    *   \"Nova Mídia\" (Botão/Link para acessar a nova mídia)\n    *   \"CRIAR NOVA MÍDIA\" (Botão na interface principal)\n*   **Campos e Opções:**\n    *   Logs (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Sessões (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Importações (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Mídias (Tabela com colunas: Início, Feed, Tipo, Alterado por)\n    *   Vídeo\n    *   Usuário\n*   **Nomes, Textos e Valores Visíveis:**\n    *   \"1. Acessar Administração.\" (Marcação 1 – Texto da anotação)\n    *   \"2. Gestão de Logs\" (Título do menu/seção)\n    *   \"3. Mídias\" (Título do menu/seção)\n    *   \"4. Nova Mídia\" (Título do menu/seção)\n    *   \"ESDC 26\" (Logotipo/Identificação do sistema - provavelmente, uma versão de um software)\n    *   \"Marcos Frias De Meneses\" (Nome do usuário) – \"marcosfrias.globo\" (e-mail associado)\n    *   Datas: 19/21/04, 28/08/2026, 20/19/56, 28/08/2026, 20/19/42, 19/24/08, 19/12/17, 28/08/2026, 20/19/40, 19/36/33, 28/08/2026, 20/19/37, 28/08/2026, 20/19/55, 28/08/2026, 20/19/57\n*   **Procedimento Demonstrado:** Acesso à tela de Administração. Indicação de como acessar a área de \"Nova Mídia\".\n*   **Sequência de Ações Indicadas pelas Marcações:**\n"
+    },
+    {
+      "image": "logagem_img_2_p2.png",
+      "model": "gemma3:4b",
+      "elapsed_seconds": 51.57,
+      "eval_count": 524,
+      "prompt_eval_count": 404,
+      "total_duration_ns": 51565985316,
+      "load_duration_ns": 1134079004,
+      "content": "Here's an analysis of the image for RAG indexing, presented in objective topics:\n\n*   **Software/System:**  \"AMDMV\" (likely a monitoring or management system - \"Estrangeira\")\n*   **Main Menu Navigation:**\n    *   “Projects” > “Main” > “ESTREIA DA CASA” > “INCFST” > “FILTRADA” > “EXTERNAL” > “08 Aug” > 27\n*   **Table View:** Displays a table with data organized by:\n    *   Name (column header)\n    *   Sort options: Ascending/Descending\n    *   Display Options:  “Created”, “Closed”, “Other”, “Modified”\n*   **Table Data:**\n    *   Multiple rows of data, including entries for: \"EXTERNAL 27-08-2000 180000\", \"EXTERNAL 27-08-2023 180000”, “EXTERNAL 27-08-2023 180000”, \"EXTERNAL 27-08-2023 200000\"\n    *   Within the table, rows are labeled with: Administrator, Administrator (multiple entries), Administrator.\n*   **Video Localization:** Step 1: “1. Localizar o vídeo.” (Indicates a video is being located)\n*   **Copying Action:** Step 2: “2. Copiar horário inicial.” (The initial time copy action is being performed).\n*   **Mobile Device Image:**  A screenshot of an Apple iPhone (model \"Pro\") with the screen displaying:\n    *   Media Server: “online”\n    *   Main ID: “5a631bb3f2d8101010101010101010101010101010101010101010101”\n    *   Video ID: “estreia_da_casa_tmp_sun_video”\n    *   Caption Modified: (text obscured)\n* **Time Display:** 18:33:00.00 (displayed in the top right corner of the screen).\n* **Date Display:** 27-08-2023 (repeatedly displayed across the interface)"
+    },
+    {
+      "image": "logagem_img_3_p2.png",
+      "model": "gemma3:4b",
+      "elapsed_seconds": 45.92,
+      "eval_count": 331,
+      "prompt_eval_count": 404,
+      "total_duration_ns": 45918959055,
+      "load_duration_ns": 1108398765,
+      "content": "*   **Software/Sistema:** RAG (presumivelmente, a interface para indexação de mídia)\n*   **Título da Janela Modal:** Nova mídia\n*   **Mensagem Principal:** 1. Selecionar o Feed que foi usado na loggagem.\n*   **Menu Dropdown \"Feed\":** EXTERNA-1\n*   **Campo \"Início do Time code\":** 27/08/2026 18:33\n*   **Botão \"Iniciar do Time code\":**  (Ícone de relógio)\n*   **Campo \"Adicionar nova MídiaID\":** 060a2b3401010101010f0013-000000-f3300ca95fe f0083-57a51ff88253-8145\n*   **Botão \"Adicionar\":** (+)\n*   **Texto abaixo do campo MídiaID:** Nenhum MídialD associada...\n*   **Botão \"Cancelar\":** CANCELAR\n*   **Botão \"Salvar\":** SALVAR\n*   **Procedimento Demonstrado:** Selecionar um Feed (EXTERNAL-1) e adicionar uma nova MídiaID.\n*   **Sequência de Ações:** O usuário seleciona o valor dropdown \"EXTERNA-1\", insere o valor da MídialD, e clica no botão \"+\"."
+    },
+    {
+      "image": "logagem_img_4_p3.png",
+      "model": "gemma3:4b",
+      "elapsed_seconds": 40.99,
+      "eval_count": 237,
+      "prompt_eval_count": 404,
+      "total_duration_ns": 40987160704,
+      "load_duration_ns": 1163717815,
+      "content": "*   **Software/Sistema:** Nova mídia (interface)\n*   **Feed:** EXTERNA-1\n*   **Início do Time code:** 27/08/2026 18:33\n*   **Adicionar nova MidialD:**  Campo para inserir o ID da mídia.\n*   **MidialDs inseridas:** 060a2b340101010101010f0013-000000-f3300ca95fe f0083-57/a51ff88253-8145\n*   **Procedimento Demonstrado:**  Preencher o Mob ID e clicar na botão para adicionar na lista.\n*   **Possibilidade de adição:** Possível adicionar 3 Mob IDs para a mesma Data/Hora/Minuto, associando PGM, ISO e BY_PGM ao mesmo tempo.\n*   **Botão:** (Sem nome visível no texto da imagem) - Botão com seta para direita."
+    },
+    {
+      "image": "logagem_img_5_p3.png",
+      "model": "gemma3:4b",
+      "elapsed_seconds": 42.11,
+      "eval_count": 246,
+      "prompt_eval_count": 404,
+      "total_duration_ns": 42105372471,
+      "load_duration_ns": 1237748078,
+      "content": "*   **Software/Sistema:** Media Central (provavelmente um sistema de indexação ou monitoramento)\n*   **Título da Janela:** Nova mídia\n*   **Menu:** Feed - EXTERNA-1\n*   **Botão:**  \"Salvar\" (verde)\n*   **Botão:** \"Cancelar\" (cinza)\n*   **Campo/Opção:** Início do Time code\\*\n*   **Data:** 27/08/2026 18:33\n*   **Valor da Identificação Única:** 060a2b340101010101010f0013-000000-r3300ca95fe0083-57a51ff88253-8145\n*   **Texto da Instrução:** 1. Clicar no botão para salvar e aguardar alguns minutos para os markers aparecerem no Media Central.\n*   **Marcação/Sequência de Ações:** Setas indicam o clique do botão “Salvar”."
+    }
+  ]
+}

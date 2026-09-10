@@ -1,0 +1,10 @@
+{
+  "image": "logagem_img_4_p3.png",
+  "model": "gemma3:4b",
+  "elapsed_seconds": 40.99,
+  "eval_count": 237,
+  "prompt_eval_count": 404,
+  "total_duration_ns": 40987160704,
+  "load_duration_ns": 1163717815,
+  "content": "*   **Software/Sistema:** Nova mídia (interface)\n*   **Feed:** EXTERNA-1\n*   **Início do Time code:** 27/08/2026 18:33\n*   **Adicionar nova MidialD:**  Campo para inserir o ID da mídia.\n*   **MidialDs inseridas:** 060a2b340101010101010f0013-000000-f3300ca95fe f0083-57/a51ff88253-8145\n*   **Procedimento Demonstrado:**  Preencher o Mob ID e clicar na botão para adicionar na lista.\n*   **Possibilidade de adição:** Possível adicionar 3 Mob IDs para a mesma Data/Hora/Minuto, associando PGM, ISO e BY_PGM ao mesmo tempo.\n*   **Botão:** (Sem nome visível no texto da imagem) - Botão com seta para direita."
+}

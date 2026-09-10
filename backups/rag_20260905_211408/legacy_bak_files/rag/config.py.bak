@@ -1,0 +1,29 @@
+EMBEDDING_MODEL = "embeddinggemma:latest"
+
+LLM_MODELS = [
+    "gemma4:26b-a4b-it-q4_K_M",
+    "qwen3.6:35b",
+    "qwen3.6:27b",
+    "gemma4:12b",
+    "gemma4:e4b",
+    "gemma3:12b",
+    "gemma3:4b",
+]
+
+DEFAULT_LLM_MODEL = "qwen3.6:27b"
+
+QDRANT_URL = "http://localhost:6333"
+
+QDRANT_COLLECTION = "rag_documents"
+
+OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
+
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+
+TOP_K = 12
+
+FINAL_CONTEXTS = 10
+
+THRESHOLD = 0.30
+
+MIN_DOMINANCE_RATIO = 0.60

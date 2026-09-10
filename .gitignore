@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches e testes
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Backups e arquivos temporários
+*.bak
+*.bak*
+*.backup
+*.bkp
+*.bkp*
+*.tmp
+*.swp
+*~
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
+
+# Configurações de IDE e SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs de execução
+*.log

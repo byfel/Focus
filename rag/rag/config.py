@@ -34,7 +34,7 @@ LLM_MODELS = [
     "gemma3:12b",
     "gemma3:4b",
 ]
-DEFAULT_LLM_MODEL = "gemma4:12b"
+DEFAULT_LLM_MODEL = "gemma3:12b"
 
 # ============================================================
 # QDRANT
@@ -58,6 +58,13 @@ TOP_K = 12
 FINAL_CONTEXTS = 10
 THRESHOLD = 0.30
 RRF_K = 60
+
+#=============================================================
+DOCUMENT_DIVERSITY_ENABLED = True
+MAX_CHUNKS_PER_DOCUMENT = 4
+
+EVIDENCE_AUDIT_ENABLED = True
+
 
 # NOTA: existia no config original mas não estava sendo usada em
 # nenhum lugar do retriever.py. Não implementei uma versão

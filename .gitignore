@@ -1,35 +1,61 @@
-# Byte-compiled / optimized / DLL files
+# ============================================================
+# DOCUMENTOS DO RAG
+# ============================================================
+
+rag/documents/
+
+
+# ============================================================
+# DADOS GERADOS PELO RAG
+# ============================================================
+
+rag/database/chunks.json
+rag/database/embeddings.json
+rag/database/ingest_state.json
+
+
+# ============================================================
+# BANCO DE CONVERSAS
+# ============================================================
+
+rag/data/conversations.db
+
+
+# ============================================================
+# QDRANT
+# ============================================================
+
+qdrant/storage/
+
+
+# ============================================================
+# PYTHON
+# ============================================================
+
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
 
-# Caches e testes
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Backups e arquivos temporários
-*.bak
-*.bak*
-*.backup
-*.bkp
-*.bkp*
-*.tmp
-*.swp
-*~
-
-# Ambientes virtuais
 .venv/
 venv/
-ENV/
 env/
 
-# Configurações de IDE e SO
+
+# ============================================================
+# LOGS
+# ============================================================
+
+*.log
+
+
+# ============================================================
+# SISTEMA / EDITOR
+# ============================================================
+
+.DS_Store
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
-desktop.ini
 
-# Logs de execução
-*.log
+# Backups locais
+*.bak
+*.bak_*

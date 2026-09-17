@@ -138,6 +138,15 @@ def main():
     test_search(client, "rag_documents", q, "v1_gemma")
     test_search(client, QDRANT_COLLECTION, q, "v2_nomic")
 
+    # 5. Teste final do pipeline V2 com diversidade e brand boost
+    print(f"\n{'='*30} TESTE DO PIPELINE V2 COM RETRIEVE() {'='*30}")
+    from core.retriever import retrieve
+    res_v2 = retrieve(q)
+    print(f"✅ Contextos selecionados após Diversidade e Brand Boost ({len(res_v2)}):")
+    for i, item in enumerate(res_v2, 1):
+        c = item["chunk"]
+        print(f"   {i:2d}. Score: {item['score']:.4f} | {c.get('document')} (pág. {c.get('page')})")
+
     print("\n" + "=" * 80)
     print("Fim do diagnóstico.")
     print("=" * 80)

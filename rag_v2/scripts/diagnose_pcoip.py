@@ -1,64 +1,43 @@
 #!/usr/bin/env python3
 """
-Script de diagnóstico para verificar por que perguntas sobre PCoIP não estão trazendo resultados.
+Script de diagnóstico comparativo V1 vs V2 para PCoIP.
 
-Verifica:
-1. Quantidade total de pontos em rag_documents_v2
-2. Quais documentos (PDFs) estão de fato indexados na coleção
-3. Se existem chunks contendo 'pcoip', 'teradici' ou 'anyware'
-4. Scores brutos do Qdrant para as perguntas problemáticas
+Compara:
+1. Coleção V1 (rag_documents) vs V2 (rag_documents_v2)
+2. Total de pontos e lista de documentos em cada uma
+3. Chunks que contêm 'pcoip', 'teradici' ou 'anyware'
+4. Busca direta de teste em ambas as coleções
 """
 import sys
-import os
 from pathlib import Path
 
 # Adiciona o path da V2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qdrant_client import QdrantClient
-from core.config import QDRANT_URL, QDRANT_COLLECTION, EMBEDDING_MODEL, THRESHOLD
+from core.config import QDRANT_URL, QDRANT_COLLECTION, EMBEDDING_MODEL
 from core.embeddings import get_embedding
-from core.retriever import retrieve
 
 
-def main():
-    print("=" * 75)
-    print("🔍 DIAGNÓSTICO DE BUSCA RAG v2 — PCoIP & DOCUMENTOS INDEXADOS")
-    print(f"   Coleção: {QDRANT_COLLECTION}")
-    print(f"   Qdrant: {QDRANT_URL}")
-    print(f"   Modelo de Embedding: {EMBEDDING_MODEL}")
-    print(f"   Threshold configurado: {THRESHOLD}")
-    print("=" * 75)
+def inspect_collection(client: QdrantClient, col_name: str):
+    print(f"\n{'='*30} INSPEÇÃO: {col_name} {'='*30}")
+    collections = [c.name for c in client.get_collections().collections]
+    if col_name not in collections:
+        print(f"❌ Coleção '{col_name}' NÃO EXISTE no Qdrant!")
+        return {}
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    info = client.get_collection(col_name)
+    print(f"📦 Total de pontos: {info.points_count}")
 
-    # 1. Informações da Coleção
-    try:
-        collections = [c.name for c in client.get_collections().collections]
-        if QDRANT_COLLECTION not in collections:
-            print(f"\n❌ Coleção '{QDRANT_COLLECTION}' NÃO EXISTE no Qdrant!")
-            print("   Execute: python3 scripts/populate_v2.py")
-            return
-
-        info = client.get_collection(QDRANT_COLLECTION)
-        print(f"\n📦 Coleção encontrada!")
-        print(f"   Total de pontos indexados: {info.points_count}")
-    except Exception as e:
-        print(f"\n❌ Erro ao conectar ao Qdrant: {e}")
-        return
-
-    # 2. Scroll de amostra para identificar documentos presentes
-    print("\n📚 Identificando documentos indexados na coleção...")
     docs = {}
-    pcoip_chunks_found = 0
-    pcoip_sample = []
+    pcoip_hits = []
 
     offset = None
     scanned = 0
 
     while True:
         records, offset = client.scroll(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=col_name,
             limit=500,
             offset=offset,
             with_payload=True,
@@ -75,81 +54,93 @@ def main():
 
             text = (payload.get("text") or "").lower()
             if "pcoip" in text or "teradici" in text or "anyware" in text:
-                pcoip_chunks_found += 1
-                if len(pcoip_sample) < 3:
-                    pcoip_sample.append({
-                        "doc": doc,
-                        "page": payload.get("page"),
-                        "text": payload.get("text", "")[:180],
-                    })
+                pcoip_hits.append({
+                    "doc": doc,
+                    "page": payload.get("page"),
+                    "snippet": (payload.get("text") or "")[:140].replace("\n", " ")
+                })
 
         if offset is None:
             break
 
-    print(f"   Total escaneado: {scanned} chunks")
-    print(f"   📄 {len(docs)} documentos únicos encontrados:")
+    print(f"📄 Documentos indexados ({len(docs)} arquivos):")
     for doc, count in sorted(docs.items(), key=lambda x: x[1], reverse=True):
-        is_pcoip = "pcoip" in doc.lower() or "teradici" in doc.lower()
-        tag = " 🌟 [PCoIP]" if is_pcoip else ""
-        print(f"      • {doc}: {count} chunks{tag}")
+        is_pcoip = any(k in doc.lower() for k in ["pcoip", "teradici", "anyware"])
+        tag = " 🌟 [ARQUIVO PCoIP]" if is_pcoip else ""
+        print(f"   • {doc}: {count} chunks{tag}")
 
-    print(f"\n🔎 Chunks que mencionam 'pcoip' / 'teradici' / 'anyware': {pcoip_chunks_found}")
-    if pcoip_sample:
-        print("   Exemplos encontrados no banco:")
-        for s in pcoip_sample:
-            print(f"      - {s['doc']} (pág. {s['page']}): \"{s['text']}...\"")
+    print(f"\n🔎 Chunks com termos PCoIP encontrados: {len(pcoip_hits)}")
+    for h in pcoip_hits[:4]:
+        print(f"   - {h['doc']} (pág. {h['page']}): \"{h['snippet']}...\"")
 
-    # 3. Teste das perguntas problemáticas
-    test_queries = [
-        "como configurar e solucionar problemas de latência no protocolo PCoIP?",
-        "como instalar o Pcoip no Rocky linux ?",
-        "PCoIP latency troubleshooting",
-        "install PCoIP Rocky Linux CentOS",
-    ]
+    return docs
 
-    print("\n" + "=" * 75)
-    print("🎯 TESTE DE RECUPERAÇÃO (RETRIEVAL) DIRETO")
-    print("=" * 75)
 
-    for q in test_queries:
-        print(f"\n❓ Pergunta: \"{q}\"")
-        try:
-            # Busca direta no Qdrant
-            emb = get_embedding(q, task_type="query").tolist()
-            qdrant_res = client.query_points(
-                collection_name=QDRANT_COLLECTION,
-                query=emb,
-                limit=5,
-                with_payload=True,
+def test_search(client: QdrantClient, col_name: str, query: str, model_type: str):
+    print(f"\n🔍 Testando busca em '{col_name}' ({model_type})")
+    print(f"   Query: \"{query}\"")
+
+    try:
+        if model_type == "v2_nomic":
+            emb = get_embedding(query, task_type="query").tolist()
+        else:
+            # Em V1 usa embeddinggemma
+            import requests
+            res = requests.post(
+                "http://localhost:11434/api/embed",
+                json={"model": "embeddinggemma:latest", "input": query},
+                timeout=30
             )
+            emb = res.json()["embeddings"][0]
 
-            print("   Top 5 no Qdrant (scores brutos):")
-            for rank, pt in enumerate(qdrant_res.points, 1):
-                p = pt.payload or {}
-                doc = p.get("document", "?")
-                page = p.get("page", "?")
-                score = pt.score
-                status = "✅ PASSOU" if score >= THRESHOLD else "❌ REJEITADO PELO THRESHOLD"
-                print(f"      {rank}. Score: {score:.4f} ({status}) | {doc} (pág. {page})")
+        res = client.query_points(
+            collection_name=col_name,
+            query=emb,
+            limit=10,
+            with_payload=True,
+        )
 
-            # Busca via pipeline retriever
-            pipeline_res = retrieve(q)
-            print(f"   -> Retorno do retrieve(): {len(pipeline_res)} contexto(s)")
+        for rank, pt in enumerate(res.points, 1):
+            p = pt.payload or {}
+            doc = p.get("document", "?")
+            page = p.get("page", "?")
+            print(f"   {rank:2d}. Score: {pt.score:.4f} | {doc} (pág. {page})")
 
-        except Exception as e:
-            print(f"   ❌ Erro ao buscar: {e}")
+    except Exception as e:
+        print(f"   ❌ Erro no teste de busca: {e}")
 
-    print("\n" + "=" * 75)
-    print("💡 CONCLUSÃO DO DIAGNÓSTICO:")
-    if pcoip_chunks_found == 0:
-        print("   🚨 NENHUM chunk sobre PCoIP foi encontrado no banco!")
-        print("      Causa: Os PDFs de PCoIP não foram incluídos no chunks.json ou")
-        print("      o populate_v2.py foi interrompido antes de chegar neles.")
+
+def main():
+    print("=" * 80)
+    print("🔬 DIAGNÓSTICO COMPARATIVO: V1 (rag_documents) vs V2 (rag_documents_v2)")
+    print("=" * 80)
+
+    client = QdrantClient(url=QDRANT_URL, timeout=30)
+
+    # 1. Inspeciona V1
+    docs_v1 = inspect_collection(client, "rag_documents")
+
+    # 2. Inspeciona V2
+    docs_v2 = inspect_collection(client, QDRANT_COLLECTION)
+
+    # 3. Diferenças entre V1 e V2
+    print(f"\n{'='*30} COMPARAÇÃO DE CONTEÚDO {'='*30}")
+    missing_in_v2 = set(docs_v1.keys()) - set(docs_v2.keys())
+    if missing_in_v2:
+        print("⚠️ Documentos presentes na V1 que NÃO ESTÃO na V2:")
+        for doc in missing_in_v2:
+            print(f"   🚨 {doc} ({docs_v1[doc]} chunks na V1)")
     else:
-        print(f"   ✅ Existem {pcoip_chunks_found} chunks sobre PCoIP na coleção.")
-        print("      Se o score bruto estiver abaixo do threshold (ex: < 0.30),")
-        print("      o ajuste do threshold resolverá a busca.")
-    print("=" * 75)
+        print("✅ Todos os documentos da V1 estão presentes na V2!")
+
+    # 4. Testes práticos de busca
+    q = "como configurar o Rocky Linux para que posso acessar ela via Pcoip / hp anywhre ?"
+    test_search(client, "rag_documents", q, "v1_gemma")
+    test_search(client, QDRANT_COLLECTION, q, "v2_nomic")
+
+    print("\n" + "=" * 80)
+    print("Fim do diagnóstico.")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

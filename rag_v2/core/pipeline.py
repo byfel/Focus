@@ -24,7 +24,9 @@ class RAGPipeline:
             {
                 "document": r["chunk"]["document"],
                 "page": r["chunk"]["page"],
-                "score": round(r["score"], 4)
+                "chunk": r["chunk"].get("chunk"),
+                "score": round(r["score"], 4),
+                "text": r["chunk"].get("text", ""),
             }
             for r in results
         ]

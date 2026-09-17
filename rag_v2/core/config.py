@@ -79,4 +79,24 @@ CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
 AUTH_MODE = os.getenv("RAG_AUTH_MODE", "local")
 LOCAL_USERNAME = os.getenv("RAG_LOCAL_USERNAME", "admin")
 LOCAL_PASSWORD = os.getenv("RAG_LOCAL_PASSWORD", "admin123")
-SESSION_COOKIE = "rag_session"
+SESSION_COOKIE = os.getenv("RAG_V2_SESSION_COOKIE", "rag_v2_session")
+SESSION_TTL_SECONDS = int(os.getenv("RAG_SESSION_TTL", "28800"))  # 8h
+SESSION_COOKIE_SECURE = os.getenv("RAG_COOKIE_SECURE", "false").lower() == "true"
+
+# ============================================================
+# SERVIDOR WEB (FastAPI V2)
+# ============================================================
+
+WEB_HOST = os.getenv("RAG_V2_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("RAG_V2_PORT", "8001"))
+
+# ============================================================
+# CONVERSAS (SQLite V2)
+# ============================================================
+
+CONVERSATIONS_DB_PATH = os.getenv(
+    "RAG_V2_CONVERSATIONS_DB",
+    os.path.join(PROJECT_ROOT, "data", "conversations_v2.db")
+)
+CONVERSATION_TITLE_MAX_CHARS = 80
+

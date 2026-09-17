@@ -6,15 +6,15 @@ from typing import List
 # PATHS
 # ============================================================
 
-PROJECT_ROOT = "/opt/ai/rag_v2"
-DATA_ROOT = "/opt/ai/rag"  # Usa dados da versão atual
+PROJECT_ROOT = os.getenv("RAG_V2_PROJECT_ROOT", "/opt/ai/rag_v2")
+DATA_ROOT = os.getenv("RAG_V2_DATA_ROOT", "/opt/ai/rag")  # Usa dados da versão atual
 
 # ============================================================
 # OLLAMA
 # ============================================================
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_EMBED_URL = f"{OLLAMA_BASE_URL}/api/embeddings"
+OLLAMA_EMBED_URL = f"{OLLAMA_BASE_URL}/api/embed"
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 
 # ============================================================
@@ -22,6 +22,15 @@ OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 # ============================================================
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+
+# Prefixos assimétricos do nomic-embed-text:
+# - "search_document: " para indexação (populate)
+# - "search_query: " para busca (retriever)
+NOMIC_SEARCH_DOC_PREFIX = "search_document: "
+NOMIC_SEARCH_QUERY_PREFIX = "search_query: "
+
+# Tamanho do lote para geração de embeddings em massa
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "50"))
 
 SUPPORTED_MODELS = [
     "gemma4:26b-a4b-it-q4_K_M",

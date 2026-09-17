@@ -33,6 +33,8 @@ LLM_MODELS = [
     "gemma4:e4b",
     "gemma3:12b",
     "gemma3:4b",
+    "qwen3-vl:8b-instruct",
+    "qwen3-vl:78b",
 ]
 DEFAULT_LLM_MODEL = "gemma3:12b"
 

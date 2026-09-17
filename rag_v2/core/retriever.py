@@ -5,7 +5,7 @@ from .config import (
     QDRANT_URL, QDRANT_COLLECTION,
     TOP_K, FINAL_CONTEXTS, THRESHOLD,
     QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT,
-    OLLAMA_CHAT_URL
+    QUERY_EXPANSION_MODEL, OLLAMA_CHAT_URL
 )
 from .embeddings import get_embedding
 
@@ -36,7 +36,7 @@ Pergunta: {query}"""
         response = requests.post(
             f"{OLLAMA_CHAT_URL}",
             json={
-                "model": "gemma3:4b",
+                "model": QUERY_EXPANSION_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
                 "options": {"temperature": 0.2}

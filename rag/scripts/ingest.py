@@ -3,6 +3,7 @@ import re
 import hashlib
 import base64
 import requests
+import argparse
 
 from pathlib import Path
 
@@ -14,18 +15,50 @@ import pymupdf
 # ============================================================
 
 DOCUMENTS_DIR = Path("/opt/ai/rag/documents")
-
 DATABASE_DIR = Path("/opt/ai/rag/database")
 
 OUTPUT_FILE = DATABASE_DIR / "chunks.json"
-
 STATE_FILE = DATABASE_DIR / "ingest_state.json"
 
 CHUNK_SIZE = 1500
 
 MIN_VALID_CHUNK_SIZE = 100
-
 MIN_VALID_WORDS = 8
+
+# Número máximo de tentativas de vision por imagem antes de
+# desistir dela definitivamente (evita reprocessar para sempre
+# uma imagem que o modelo nunca consegue descrever de forma válida).
+MAX_VISION_ATTEMPTS = 3
+
+
+# ============================================================
+# ESCOPO DO DOCUMENTO
+# ============================================================
+
+def get_document_scope(pdf_path):
+    """
+    Determina se o documento é público ou interno.
+
+    Estrutura esperada:
+
+        documents/
+            manual.pdf
+            outro.pdf
+
+            internal/
+                documento-interno.pdf
+
+    Qualquer PDF dentro de 'internal/' será considerado interno.
+    """
+
+    relative_path = pdf_path.relative_to(
+        DOCUMENTS_DIR
+    )
+
+    if "internal" in relative_path.parts:
+        return "internal"
+
+    return "public"
 
 
 # ============================================================
@@ -75,10 +108,15 @@ def calculate_image_hash(image_bytes):
 
 
 # ============================================================
-# IDENTIFICAÇÃO DO CHUNK
+# IDENTIFICAÇÃO DO CHUNK DE TEXTO
 # ============================================================
 
-def generate_chunk_id(document, page, chunk, text):
+def generate_chunk_id(
+    document,
+    page,
+    chunk,
+    text
+):
 
     content = (
         f"{document}|"
@@ -210,7 +248,7 @@ def clean_text(text):
 
 
 # ============================================================
-# VALIDAÇÃO
+# VALIDAÇÃO DO CHUNK DE TEXTO
 # ============================================================
 
 def is_valid_chunk(text):
@@ -261,7 +299,7 @@ def is_valid_chunk(text):
 
 
 # ============================================================
-# VALIDAÇÃO VISION
+# VALIDAÇÃO DO TEXTO VISION
 # ============================================================
 
 def is_valid_vision_text(text):
@@ -363,7 +401,6 @@ def split_text(text):
 
 def analyze_image_with_vision(
     image_bytes,
-    document_name,
     page_number,
     image_index
 ):
@@ -482,10 +519,33 @@ def process_pdf_images(
     pdf_path,
     doc,
     file_hash,
-    old_chunks
+    old_chunks,
+    old_vision_failures=None
 ):
+    """
+    Retorna (results, vision_failures).
+
+    vision_failures é um dict {image_hash: tentativas} usado para
+    limitar quantas vezes uma mesma imagem é reenviada ao modelo
+    de vision caso ela continue falhando na validação.
+    """
+
+    if old_vision_failures is None:
+        old_vision_failures = {}
 
     results = []
+
+    # Começa como cópia do estado anterior; vai sendo atualizado
+    # conforme as imagens são (re)processadas nesta execução.
+    vision_failures = dict(old_vision_failures)
+
+    document_scope = get_document_scope(
+        pdf_path
+    )
+
+    # --------------------------------------------------------
+    # Vision antigo indexado pelo image_hash
+    # --------------------------------------------------------
 
     old_vision_by_image_hash = {}
 
@@ -505,12 +565,14 @@ def process_pdf_images(
             ] = chunk
 
     images_found = 0
-
     images_reused = 0
-
     images_processed = 0
-
     images_failed = 0
+    images_skipped = 0
+
+    # --------------------------------------------------------
+    # Percorre páginas
+    # --------------------------------------------------------
 
     for page_number, page in enumerate(
         doc,
@@ -523,6 +585,10 @@ def process_pdf_images(
 
         if not images:
             continue
+
+        # ----------------------------------------------------
+        # Percorre imagens
+        # ----------------------------------------------------
 
         for image_index, image_info in enumerate(
             images,
@@ -560,7 +626,7 @@ def process_pdf_images(
             )
 
             # ------------------------------------------------
-            # IMAGEM JÁ PROCESSADA
+            # IMAGEM JÁ PROCESSADA COM SUCESSO
             # ------------------------------------------------
 
             if image_hash in old_vision_by_image_hash:
@@ -569,8 +635,20 @@ def process_pdf_images(
                     image_hash
                 ]
 
-                results.append(
+                reused_chunk = dict(
                     old_chunk
+                )
+
+                reused_chunk[
+                    "file_hash"
+                ] = file_hash
+
+                reused_chunk[
+                    "document_scope"
+                ] = document_scope
+
+                results.append(
+                    reused_chunk
                 )
 
                 images_reused += 1
@@ -584,14 +662,35 @@ def process_pdf_images(
                 continue
 
             # ------------------------------------------------
-            # NOVA IMAGEM
+            # IMAGEM JÁ ESGOTOU TENTATIVAS DE VISION
+            # ------------------------------------------------
+
+            attempts_so_far = vision_failures.get(
+                image_hash,
+                0
+            )
+
+            if attempts_so_far >= MAX_VISION_ATTEMPTS:
+
+                images_skipped += 1
+
+                print(
+                    f"      Vision: imagem ignorada "
+                    f"(página {page_number}, "
+                    f"imagem {image_index}) - "
+                    f"já falhou {attempts_so_far}x"
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # NOVA TENTATIVA DE VISION
             # ------------------------------------------------
 
             images_processed += 1
 
             vision_text = analyze_image_with_vision(
                 image_bytes,
-                pdf_path.name,
                 page_number,
                 image_index
             )
@@ -601,13 +700,24 @@ def process_pdf_images(
             ):
 
                 print(
-                    f"      Vision: conteúdo "
-                    f"não considerado válido"
+                    "      Vision: conteúdo "
+                    "não considerado válido"
                 )
 
                 images_failed += 1
 
+                vision_failures[
+                    image_hash
+                ] = attempts_so_far + 1
+
                 continue
+
+            # Sucesso: garante que a imagem não fique mais
+            # marcada como "em falha".
+            vision_failures.pop(
+                image_hash,
+                None
+            )
 
             chunk_id = generate_vision_chunk_id(
                 pdf_path.name,
@@ -630,6 +740,8 @@ def process_pdf_images(
 
                 "source_type": "vision",
 
+                "document_scope": document_scope,
+
                 "image_index": image_index,
 
                 "image_hash": image_hash,
@@ -641,26 +753,30 @@ def process_pdf_images(
     print()
 
     print(
-        f"  Imagens encontradas : {images_found}"
+        f"  Imagens encontradas  : {images_found}"
     )
 
     print(
-        f"  Imagens reutilizadas : {images_reused}"
+        f"  Imagens reutilizadas  : {images_reused}"
     )
 
     print(
-        f"  Imagens processadas  : {images_processed}"
+        f"  Imagens processadas   : {images_processed}"
     )
 
     print(
-        f"  Imagens com erro     : {images_failed}"
+        f"  Imagens com erro      : {images_failed}"
     )
 
     print(
-        f"  Chunks vision        : {len(results)}"
+        f"  Imagens ignoradas (limite): {images_skipped}"
     )
 
-    return results
+    print(
+        f"  Chunks vision         : {len(results)}"
+    )
+
+    return results, vision_failures
 
 
 # ============================================================
@@ -670,17 +786,29 @@ def process_pdf_images(
 def process_pdf(
     pdf_path,
     file_hash,
-    old_chunks=None
+    old_chunks=None,
+    old_vision_failures=None
 ):
+    """
+    Retorna (results, vision_failures).
+    """
 
     if old_chunks is None:
 
         old_chunks = []
 
+    document_scope = get_document_scope(
+        pdf_path
+    )
+
     print()
 
     print(
         f"Processando: {pdf_path.name}"
+    )
+
+    print(
+        f"Escopo: {document_scope}"
     )
 
     print(
@@ -696,6 +824,10 @@ def process_pdf(
     paginas_vazias = 0
 
     chunks_descartados = 0
+
+    # --------------------------------------------------------
+    # PROCESSAMENTO DE TEXTO
+    # --------------------------------------------------------
 
     for page_number, page in enumerate(
         doc,
@@ -770,6 +902,8 @@ def process_pdf(
 
                 "source_type": "text",
 
+                "document_scope": document_scope,
+
                 "text": chunk
 
             })
@@ -785,6 +919,10 @@ def process_pdf(
 
     page_count = len(doc)
 
+    # --------------------------------------------------------
+    # PROCESSAMENTO VISION
+    # --------------------------------------------------------
+
     print()
 
     print(
@@ -799,11 +937,12 @@ def process_pdf(
         "  --------------------------------------"
     )
 
-    vision_chunks = process_pdf_images(
+    vision_chunks, vision_failures = process_pdf_images(
         pdf_path,
         doc,
         file_hash,
-        old_chunks
+        old_chunks,
+        old_vision_failures
     )
 
     results.extend(
@@ -811,6 +950,10 @@ def process_pdf(
     )
 
     doc.close()
+
+    # --------------------------------------------------------
+    # RESULTADO DO DOCUMENTO
+    # --------------------------------------------------------
 
     print()
 
@@ -834,14 +977,17 @@ def process_pdf(
         f"{len(results)}"
     )
 
-    return results
+    return results, vision_failures
 
 
 # ============================================================
 # CARREGAR JSON
 # ============================================================
 
-def load_json(file_path, default):
+def load_json(
+    file_path,
+    default
+):
 
     if not file_path.exists():
 
@@ -886,10 +1032,140 @@ def document_has_vision_chunks(
 
 
 # ============================================================
+# VALIDAR NOMES DE DOCUMENTOS
+# ============================================================
+
+def validate_unique_document_names(
+    pdf_files
+):
+
+    documents = {}
+
+    for pdf in pdf_files:
+
+        document_name = pdf.name
+
+        documents.setdefault(
+            document_name,
+            []
+        ).append(
+            pdf
+        )
+
+    duplicates = {
+        name: paths
+        for name, paths in documents.items()
+        if len(paths) > 1
+    }
+
+    if not duplicates:
+        return True
+
+    print()
+
+    print(
+        "ERRO: existem PDFs com o mesmo nome."
+    )
+
+    print(
+        "O sistema utiliza o nome do arquivo "
+        "como identidade do documento."
+    )
+
+    print()
+
+    for document_name, paths in duplicates.items():
+
+        print(
+            f"Documento duplicado: {document_name}"
+        )
+
+        for path in paths:
+
+            print(
+                f"  - {path}"
+            )
+
+        print()
+
+    print(
+        "Renomeie os arquivos antes de executar "
+        "a ingestão."
+    )
+
+    return False
+
+
+# ============================================================
+# ATUALIZAR CHUNKS REUTILIZADOS
+# ============================================================
+
+def update_reused_chunks(
+    chunks,
+    file_hash,
+    document_scope
+):
+
+    updated_chunks = []
+
+    for chunk in chunks:
+
+        updated_chunk = dict(
+            chunk
+        )
+
+        updated_chunk[
+            "file_hash"
+        ] = file_hash
+
+        updated_chunk[
+            "document_scope"
+        ] = document_scope
+
+        updated_chunks.append(
+            updated_chunk
+        )
+
+    return updated_chunks
+
+
+# ============================================================
+# ARGUMENTOS
+# ============================================================
+
+def parse_args():
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Ingestão incremental de documentos PDF "
+            "para o RAG."
+        )
+    )
+
+    parser.add_argument(
+        "--scope",
+        choices=(
+            "public",
+            "internal",
+            "all"
+        ),
+        default="public",
+        help=(
+            "Escopo dos documentos a processar. "
+            "Padrão: public."
+        )
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
+    args = parse_args()
 
     DATABASE_DIR.mkdir(
         parents=True,
@@ -920,18 +1196,65 @@ def main():
         f"Vision model: {VISION_MODEL}"
     )
 
-    pdf_files = sorted(
-        DOCUMENTS_DIR.glob("*.pdf")
+    print(
+        f"Escopo selecionado: {args.scope}"
+    )
+
+    # --------------------------------------------------------
+    # Localiza TODOS os PDFs
+    # --------------------------------------------------------
+
+    all_pdf_files = sorted(
+        DOCUMENTS_DIR.rglob("*.pdf")
     )
 
     print(
-        f"PDFs encontrados: {len(pdf_files)}"
+        f"PDFs encontrados no diretório: "
+        f"{len(all_pdf_files)}"
     )
 
-    if not pdf_files:
+    if not all_pdf_files:
 
         print(
             "\nNenhum PDF encontrado."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Validação de nomes duplicados
+    # --------------------------------------------------------
+
+    if not validate_unique_document_names(
+        all_pdf_files
+    ):
+
+        return
+
+    # --------------------------------------------------------
+    # Seleciona PDFs pelo escopo
+    # --------------------------------------------------------
+
+    selected_pdf_files = sorted(
+        p
+        for p in all_pdf_files
+        if (
+            args.scope == "all"
+            or get_document_scope(p) == args.scope
+        )
+    )
+
+    print(
+        f"PDFs selecionados para ingestão "
+        f"({args.scope}): "
+        f"{len(selected_pdf_files)}"
+    )
+
+    if not selected_pdf_files:
+
+        print(
+            "\nNenhum PDF encontrado para "
+            f"o escopo '{args.scope}'."
         )
 
         return
@@ -962,7 +1285,12 @@ def main():
 
     for chunk in old_chunks:
 
-        document = chunk["document"]
+        document = chunk.get(
+            "document"
+        )
+
+        if not document:
+            continue
 
         old_chunks_by_document.setdefault(
             document,
@@ -972,33 +1300,73 @@ def main():
         )
 
     # --------------------------------------------------------
+    # Documentos existentes fisicamente
+    # --------------------------------------------------------
+
+    all_current_documents = {
+        pdf.name
+        for pdf in all_pdf_files
+    }
+
+    selected_documents = {
+        pdf.name
+        for pdf in selected_pdf_files
+    }
+
+    # --------------------------------------------------------
     # Resultado final
     # --------------------------------------------------------
 
     final_chunks = []
 
     new_documents = 0
-
     unchanged_documents = 0
-
     changed_documents = 0
-
     removed_documents = 0
-
-    vision_documents = 0
+    failed_documents = 0
 
     # --------------------------------------------------------
-    # Processa PDFs
+    # PRESERVA DOCUMENTOS FORA DO ESCOPO
+    # --------------------------------------------------------
+    #
+    # Isto é fundamental.
+    #
+    # Se rodarmos:
+    #
+    #     --scope public
+    #
+    # os chunks internos já existentes permanecem.
+    #
+    # Se rodarmos:
+    #
+    #     --scope internal
+    #
+    # os chunks públicos já existentes permanecem.
+    #
     # --------------------------------------------------------
 
-    current_documents = set()
+    for document_name, document_chunks in (
+        old_chunks_by_document.items()
+    ):
 
-    for pdf in pdf_files:
+        if document_name not in selected_documents:
+
+            if document_name in all_current_documents:
+
+                final_chunks.extend(
+                    document_chunks
+                )
+
+    # --------------------------------------------------------
+    # PROCESSA PDFs SELECIONADOS
+    # --------------------------------------------------------
+
+    for pdf in selected_pdf_files:
 
         document_name = pdf.name
 
-        current_documents.add(
-            document_name
+        document_scope = get_document_scope(
+            pdf
         )
 
         print()
@@ -1012,17 +1380,62 @@ def main():
         )
 
         print(
+            f"Escopo: {document_scope}"
+        )
+
+        print(
+            f"Caminho: {pdf}"
+        )
+
+        print(
             "Calculando SHA256..."
         )
 
-        file_hash = calculate_file_hash(
-            pdf
+        try:
+
+            file_hash = calculate_file_hash(
+                pdf
+            )
+
+        except Exception as e:
+
+            print(
+                f"  ERRO calculando hash de "
+                f"{document_name}: {e}"
+            )
+
+            print(
+                "  Documento será ignorado "
+                "nesta execução."
+            )
+
+            failed_documents += 1
+
+            # Se já existiam chunks desse documento,
+            # preserva-os para não perder dados.
+
+            if document_name in old_chunks_by_document:
+
+                final_chunks.extend(
+                    old_chunks_by_document[
+                        document_name
+                    ]
+                )
+
+            continue
+
+        previous_state = state.get(
+            document_name,
+            {}
         )
 
-        previous_hash = (
-            state
-            .get(document_name, {})
-            .get("sha256")
+        previous_hash = previous_state.get(
+            "sha256"
+        )
+
+        previous_vision_failures = previous_state.get(
+            "vision_failures",
+            {}
         )
 
         document_old_chunks = (
@@ -1037,7 +1450,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # PDF não mudou E já possui vision
+        # PDF NÃO MUDOU E JÁ POSSUI VISION
         # ----------------------------------------------------
 
         if (
@@ -1054,16 +1467,38 @@ def main():
                 "Chunks antigos serão reutilizados."
             )
 
+            reused_chunks = update_reused_chunks(
+                document_old_chunks,
+                file_hash,
+                document_scope
+            )
+
             final_chunks.extend(
-                document_old_chunks
+                reused_chunks
             )
 
             unchanged_documents += 1
 
+            state[
+                document_name
+            ] = {
+
+                "sha256": file_hash,
+
+                "chunks": len(
+                    reused_chunks
+                ),
+
+                "document_scope": document_scope,
+
+                "vision_failures": previous_vision_failures
+
+            }
+
             continue
 
         # ----------------------------------------------------
-        # PDF não mudou MAS ainda não possui vision
+        # PDF NÃO MUDOU MAS AINDA NÃO POSSUI VISION
         # ----------------------------------------------------
 
         if (
@@ -1081,34 +1516,89 @@ def main():
             )
 
             print(
-                "Vision ainda não processado."
+                "Vision ainda não processado "
+                "(ou pendente de novas tentativas)."
             )
 
-            text_chunks = [
-                chunk
-                for chunk in document_old_chunks
+            text_chunks = []
+
+            for chunk in document_old_chunks:
+
                 if chunk.get(
                     "source_type",
                     "text"
-                ) != "vision"
-            ]
+                ) == "vision":
 
-            chunks = process_pdf(
-                pdf,
-                file_hash,
-                text_chunks
-            )
+                    continue
+
+                reused_chunk = dict(
+                    chunk
+                )
+
+                reused_chunk[
+                    "file_hash"
+                ] = file_hash
+
+                reused_chunk[
+                    "document_scope"
+                ] = document_scope
+
+                text_chunks.append(
+                    reused_chunk
+                )
+
+            try:
+
+                chunks, vision_failures = process_pdf(
+                    pdf,
+                    file_hash,
+                    text_chunks,
+                    previous_vision_failures
+                )
+
+            except Exception as e:
+
+                print(
+                    f"  ERRO processando "
+                    f"{document_name}: {e}"
+                )
+
+                print(
+                    "  Chunks anteriores (sem vision) "
+                    "serão mantidos; documento será "
+                    "tentado novamente na próxima execução."
+                )
+
+                failed_documents += 1
+
+                final_chunks.extend(
+                    document_old_chunks
+                )
+
+                continue
 
             final_chunks.extend(
                 chunks
             )
 
-            vision_documents += 1
+            state[
+                document_name
+            ] = {
+
+                "sha256": file_hash,
+
+                "chunks": len(chunks),
+
+                "document_scope": document_scope,
+
+                "vision_failures": vision_failures
+
+            }
 
             continue
 
         # ----------------------------------------------------
-        # PDF novo
+        # PDF NOVO
         # ----------------------------------------------------
 
         if previous_hash is None:
@@ -1120,7 +1610,7 @@ def main():
             new_documents += 1
 
         # ----------------------------------------------------
-        # PDF alterado
+        # PDF ALTERADO
         # ----------------------------------------------------
 
         else:
@@ -1131,32 +1621,84 @@ def main():
 
             changed_documents += 1
 
-        chunks = process_pdf(
-            pdf,
-            file_hash,
-            document_old_chunks
-        )
+        # ----------------------------------------------------
+        # Processamento completo
+        # ----------------------------------------------------
+
+        try:
+
+            chunks, vision_failures = process_pdf(
+                pdf,
+                file_hash,
+                document_old_chunks,
+                previous_vision_failures
+            )
+
+        except Exception as e:
+
+            print(
+                f"  ERRO processando {document_name}: {e}"
+            )
+
+            failed_documents += 1
+
+            if document_name in old_chunks_by_document:
+
+                print(
+                    "  Chunks da versão anterior serão "
+                    "mantidos; documento será tentado "
+                    "novamente na próxima execução."
+                )
+
+                final_chunks.extend(
+                    document_old_chunks
+                )
+
+            else:
+
+                print(
+                    "  Documento não possui chunks "
+                    "anteriores; será ignorado nesta "
+                    "execução e tentado novamente na "
+                    "próxima."
+                )
+
+            continue
 
         final_chunks.extend(
             chunks
         )
 
-        vision_documents += 1
-
         # ----------------------------------------------------
         # Atualiza estado
         # ----------------------------------------------------
 
-        state[document_name] = {
+        state[
+            document_name
+        ] = {
 
             "sha256": file_hash,
 
-            "chunks": len(chunks)
+            "chunks": len(chunks),
+
+            "document_scope": document_scope,
+
+            "vision_failures": vision_failures
 
         }
 
     # --------------------------------------------------------
     # Detecta PDFs removidos
+    # --------------------------------------------------------
+    #
+    # IMPORTANTE:
+    #
+    # A comparação é feita contra TODOS os PDFs físicos,
+    # e não somente contra o escopo selecionado.
+    #
+    # Isso evita que --scope public interprete os documentos
+    # internos como removidos.
+    #
     # --------------------------------------------------------
 
     previous_documents = set(
@@ -1165,7 +1707,7 @@ def main():
 
     removed = (
         previous_documents
-        - current_documents
+        - all_current_documents
     )
 
     for document_name in removed:
@@ -1180,7 +1722,7 @@ def main():
         removed_documents += 1
 
     # --------------------------------------------------------
-    # Remove documentos antigos do estado
+    # Remove documentos realmente apagados
     # --------------------------------------------------------
 
     for document_name in removed:
@@ -1225,7 +1767,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Resultado
+    # Estatísticas
     # --------------------------------------------------------
 
     text_chunks_count = sum(
@@ -1245,6 +1787,48 @@ def main():
         ) == "vision"
     )
 
+    public_chunks_count = sum(
+        1
+        for chunk in final_chunks
+        if chunk.get(
+            "document_scope"
+        ) == "public"
+    )
+
+    internal_chunks_count = sum(
+        1
+        for chunk in final_chunks
+        if chunk.get(
+            "document_scope"
+        ) == "internal"
+    )
+
+    public_documents = sum(
+        1
+        for pdf in all_pdf_files
+        if get_document_scope(pdf) == "public"
+    )
+
+    internal_documents = sum(
+        1
+        for pdf in all_pdf_files
+        if get_document_scope(pdf) == "internal"
+    )
+
+    # Calculado a partir do resultado final (não de um contador
+    # incrementado durante o loop), para refletir de fato quantos
+    # documentos distintos possuem pelo menos um chunk de vision.
+
+    documents_with_vision = len({
+        chunk.get("document")
+        for chunk in final_chunks
+        if chunk.get("source_type") == "vision"
+    })
+
+    # --------------------------------------------------------
+    # Resultado
+    # --------------------------------------------------------
+
     print()
 
     print(
@@ -1260,54 +1844,89 @@ def main():
     )
 
     print(
-        f"PDFs novos       : {new_documents}"
+        f"Escopo processado  : {args.scope}"
     )
 
     print(
-        f"PDFs inalterados : {unchanged_documents}"
+        f"PDFs no diretório  : {len(all_pdf_files)}"
     )
 
     print(
-        f"PDFs alterados   : {changed_documents}"
+        f"PDFs selecionados  : {len(selected_pdf_files)}"
     )
 
     print(
-        f"PDFs removidos   : {removed_documents}"
+        f"PDFs públicos      : {public_documents}"
     )
 
     print(
-        f"Docs com Vision  : {vision_documents}"
+        f"PDFs internos      : {internal_documents}"
     )
 
     print(
-        f"Chunks de texto  : {text_chunks_count}"
+        f"PDFs novos         : {new_documents}"
     )
 
     print(
-        f"Chunks Vision    : {vision_chunks_count}"
+        f"PDFs inalterados   : {unchanged_documents}"
     )
 
     print(
-        f"Total de chunks  : {len(final_chunks)}"
+        f"PDFs alterados     : {changed_documents}"
     )
 
     print(
-        f"Chunks antigos   : "
-        f"{len(old_chunks)}"
+        f"PDFs removidos     : {removed_documents}"
     )
 
     print(
-        f"Arquivo chunks   : {OUTPUT_FILE}"
+        f"PDFs com erro      : {failed_documents}"
     )
 
     print(
-        f"Arquivo estado   : {STATE_FILE}"
+        f"Docs com Vision    : {documents_with_vision}"
+    )
+
+    print(
+        f"Chunks de texto    : {text_chunks_count}"
+    )
+
+    print(
+        f"Chunks Vision      : {vision_chunks_count}"
+    )
+
+    print(
+        f"Chunks públicos    : {public_chunks_count}"
+    )
+
+    print(
+        f"Chunks internos    : {internal_chunks_count}"
+    )
+
+    print(
+        f"Total de chunks    : {len(final_chunks)}"
+    )
+
+    print(
+        f"Chunks antigos     : {len(old_chunks)}"
+    )
+
+    print(
+        f"Arquivo chunks     : {OUTPUT_FILE}"
+    )
+
+    print(
+        f"Arquivo estado     : {STATE_FILE}"
     )
 
     print(
         "========================================"
     )
 
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
 
 if __name__ == "__main__":
 

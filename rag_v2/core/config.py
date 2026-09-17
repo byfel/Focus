@@ -42,7 +42,7 @@ SUPPORTED_MODELS = [
     "gemma3:4b",
 ]
 
-DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemma4:12b")
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemma3:12b")
 QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "gemma3:4b")
 
 # ============================================================

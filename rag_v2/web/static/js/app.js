@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let selectedModel = 'gemma3:12b';
     let isGenerating = false;
     let timerInterval = null;
+    let currentAbortController = null;
 
     // DOM Elements
     const sidebar = document.getElementById('sidebar');
@@ -74,14 +75,23 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-        // Send button click
+        // Send / Stop button click
         if (sendBtn) {
             sendBtn.addEventListener('click', () => {
-                if (!isGenerating && chatInput.value.trim().length > 0) {
+                if (isGenerating) {
+                    stopGeneration();
+                } else if (chatInput.value.trim().length > 0) {
                     sendMessage();
                 }
             });
         }
+
+        // Tecla ESC para interromper geração
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && isGenerating) {
+                stopGeneration();
+            }
+        });
 
         // Logout
         if (logoutBtn) {
@@ -97,8 +107,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateSendButtonState() {
-        const hasText = chatInput.value.trim().length > 0;
-        sendBtn.disabled = !hasText || isGenerating;
+        if (isGenerating) {
+            sendBtn.disabled = false;
+            sendBtn.classList.add('stop');
+            sendBtn.title = 'Interromper geração (Esc)';
+            sendBtn.innerHTML = `
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="5" y="5" width="14" height="14" rx="3"/>
+                </svg>
+            `;
+        } else {
+            sendBtn.classList.remove('stop');
+            sendBtn.title = 'Enviar mensagem (Enter)';
+            sendBtn.innerHTML = `
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"/>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+            `;
+            const hasText = chatInput.value.trim().length > 0;
+            sendBtn.disabled = !hasText;
+        }
     }
 
     async function loadCurrentUser() {
@@ -487,6 +516,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!text || isGenerating) return;
 
         isGenerating = true;
+        currentAbortController = new AbortController();
         updateSendButtonState();
 
         // Ensure we have a conversation ID
@@ -513,7 +543,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatInput.value = '';
         chatInput.style.height = 'auto';
 
-        // Add Thinking Indicator with live timer
+        // Add Thinking Indicator with live timer and STOP button
         const thinkingRow = document.createElement('div');
         thinkingRow.className = 'message-row assistant';
         thinkingRow.id = 'thinkingRow';
@@ -529,11 +559,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="thinking-indicator">
                     <div class="shimmer-bar"></div>
                     <span id="thinkingTimerText">Consultando nomic-embed-text e gerando resposta... 0.0s</span>
+                    <button type="button" class="stop-generation-btn" id="stopThinkingBtn" title="Interromper geração (Esc)">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="5" y="5" width="14" height="14" rx="2"/>
+                        </svg>
+                        <span>Parar</span>
+                    </button>
                 </div>
             </div>
         `;
         messagesContent.appendChild(thinkingRow);
         scrollToBottom();
+
+        const stopThinkingBtn = thinkingRow.querySelector('#stopThinkingBtn');
+        if (stopThinkingBtn) {
+            stopThinkingBtn.addEventListener('click', stopGeneration);
+        }
 
         const startTime = Date.now();
         const timerText = thinkingRow.querySelector('#thinkingTimerText');
@@ -548,6 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch('/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: currentAbortController.signal,
                 body: JSON.stringify({
                     question: text,
                     model: selectedModel,
@@ -571,6 +613,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 );
             }
         } catch (e) {
+            if (e.name === 'AbortError') {
+                // Interrupção manual do usuário, tratado em stopGeneration()
+                return;
+            }
+
             clearInterval(timerInterval);
             const thinkingElem = document.getElementById('thinkingRow');
             if (thinkingElem) thinkingElem.remove();
@@ -580,10 +627,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 `❌ **Falha de comunicação com o servidor:** ${e.message}. Tente novamente.`
             );
         } finally {
+            currentAbortController = null;
             isGenerating = false;
             updateSendButtonState();
             chatInput.focus();
         }
+    }
+
+    function stopGeneration() {
+        if (!isGenerating) return;
+
+        if (currentAbortController) {
+            currentAbortController.abort();
+            currentAbortController = null;
+        }
+
+        if (timerInterval) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+
+        const thinkingElem = document.getElementById('thinkingRow');
+        if (thinkingElem) {
+            thinkingElem.remove();
+            appendMessageToUI(
+                'assistant',
+                '⏹️ *Geração interrompida pelo usuário.* Você pode digitar uma nova pergunta agora.'
+            );
+        }
+
+        isGenerating = false;
+        updateSendButtonState();
+        chatInput.focus();
     }
 
     async function renameConversation(id, currentTitle) {

@@ -101,8 +101,46 @@ def load_chunks() -> list:
     return chunks
 
 
-def populate(client: QdrantClient, chunks: list):
+def get_existing_ids(client: QdrantClient) -> set:
+    """Recupera IDs de pontos já existentes no Qdrant para ingestão incremental."""
+    collections = [c.name for c in client.get_collections().collections]
+    if QDRANT_COLLECTION not in collections:
+        return set()
+
+    ids = set()
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            limit=1000,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        for record in records:
+            ids.add(record.id)
+        if offset is None:
+            break
+    return ids
+
+
+def populate(client: QdrantClient, chunks: list, incremental: bool = True):
     """Gera embeddings com nomic-embed-text e insere no Qdrant."""
+    if incremental:
+        existing_ids = get_existing_ids(client)
+        if existing_ids:
+            print(f"🔍 Verificando pontos existentes: {len(existing_ids)} encontrados.")
+            chunks_to_process = [
+                c for c in chunks
+                if generate_qdrant_id(c.get("chunk_id", "")) not in existing_ids
+            ]
+            if not chunks_to_process:
+                print("✨ Todos os chunks de chunks.json já estão indexados no Qdrant v2!")
+                print("   Nenhum novo documento para processar.")
+                return 0, 0, 0
+            print(f"🆕 {len(chunks_to_process)} chunks novos a serem indexados.")
+            chunks = chunks_to_process
+
     total = len(chunks)
     batch_size = EMBEDDING_BATCH_SIZE
     total_batches = (total + batch_size - 1) // batch_size
@@ -209,7 +247,7 @@ def main():
     chunks = load_chunks()
 
     # 4. Popula
-    inserted, errors, elapsed = populate(client, chunks)
+    inserted, errors, elapsed = populate(client, chunks, incremental=not args.recreate)
 
     # 5. Resultado final
     info = client.get_collection(QDRANT_COLLECTION)

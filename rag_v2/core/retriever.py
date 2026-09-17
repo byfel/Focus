@@ -1,9 +1,11 @@
+import re
 import requests
 from typing import List, Dict
 from qdrant_client import QdrantClient
 from .config import (
     QDRANT_URL, QDRANT_COLLECTION,
     TOP_K, FINAL_CONTEXTS, THRESHOLD,
+    MAX_CHUNKS_PER_DOCUMENT,
     QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT,
     QUERY_EXPANSION_MODEL, OLLAMA_CHAT_URL
 )
@@ -114,9 +116,16 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
             candidate["appearances"] += 1
             candidate["best_score"] = max(candidate["best_score"], float(point.score))
     
+    # Extrai termos técnicos significativos da pergunta para relevância semântica híbrida
+    stopwords = {"como", "para", "posso", "pode", "qual", "quais", "onde", "quando", "quem", "esse", "essa", "este", "esta", "com", "sem", "por", "que", "uma", "uns", "das", "dos", "nas", "nos", "sobre", "qualquer", "mais", "menos", "acessar", "configurar", "instalar", "fazer"}
+    query_terms = [w for w in re.findall(r'[a-zA-Z0-9_\-\.]{3,}', query.lower()) if w not in stopwords]
+
     RRF_K = 60
     for item in all_candidates.values():
         item["rrf_score"] = sum(1.0 / (RRF_K + rank) for rank in item["rrf_ranks"])
+        doc_str = (item.get("document") or "").lower()
+        text_str = (item.get("text") or "").lower()
+        item["keyword_hits"] = sum(1 for term in query_terms if term in doc_str or term in text_str)
     
     candidates = [c for c in all_candidates.values() if c["best_score"] >= threshold]
     
@@ -132,9 +141,42 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
     elif not candidates:
         return []
     
-    candidates.sort(key=lambda x: (x["rrf_score"], x["appearances"], x["best_score"]), reverse=True)
+    # Ordena priorizando chunks que contêm as palavras-chave da busca, seguido de RRF e score
+    candidates.sort(
+        key=lambda x: (
+            x["keyword_hits"] > 0,
+            x["keyword_hits"],
+            x["rrf_score"],
+            x["appearances"],
+            x["best_score"]
+        ),
+        reverse=True
+    )
     
-    selected = candidates[:FINAL_CONTEXTS]
+    # ========================================================
+    # DIVERSIDADE DOCUMENTAL: Evita que um único livro (ex: Linux Bíblia)
+    # monopolize todos os slots de contexto, permitindo que manuais
+    # específicos (ex: PCoIP, Dante, Flame) sejam incluídos.
+    # ========================================================
+    selected = []
+    doc_counts = {}
+
+    for item in candidates:
+        doc = item.get("document") or "desconhecido"
+        if doc_counts.get(doc, 0) < MAX_CHUNKS_PER_DOCUMENT:
+            selected.append(item)
+            doc_counts[doc] = doc_counts.get(doc, 0) + 1
+            if len(selected) >= FINAL_CONTEXTS:
+                break
+
+    # Se ainda sobrarem slots até FINAL_CONTEXTS, completa com os melhores restantes
+    if len(selected) < FINAL_CONTEXTS:
+        selected_ids = {s["id"] for s in selected}
+        for item in candidates:
+            if item["id"] not in selected_ids:
+                selected.append(item)
+                if len(selected) >= FINAL_CONTEXTS:
+                    break
     
     return [
         {

@@ -57,8 +57,9 @@ QDRANT_VECTOR_SIZE = int(os.getenv("QDRANT_VECTOR_SIZE", "768"))
 # RAG PARAMETERS
 # ============================================================
 
-TOP_K = int(os.getenv("RAG_TOP_K", "12"))
+TOP_K = int(os.getenv("RAG_TOP_K", "30"))
 FINAL_CONTEXTS = int(os.getenv("RAG_FINAL_CONTEXTS", "10"))
+MAX_CHUNKS_PER_DOCUMENT = int(os.getenv("RAG_MAX_CHUNKS_PER_DOC", "2"))
 THRESHOLD = float(os.getenv("RAG_THRESHOLD", "0.25"))
 
 QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"

@@ -57,7 +57,9 @@ Pergunta: {query}"""
         print(f"⚠️ Query expansion falhou: {e}")
         return [query]
 
-def retrieve(query: str, top_k: int = TOP_K, threshold: float = THRESHOLD) -> List[Dict]:
+def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dict]:
+    top_k = top_k if top_k is not None else TOP_K
+    threshold = threshold if threshold is not None else THRESHOLD
     queries = expand_query(query)
     
     all_candidates = {}

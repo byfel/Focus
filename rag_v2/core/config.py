@@ -59,9 +59,9 @@ QDRANT_VECTOR_SIZE = int(os.getenv("QDRANT_VECTOR_SIZE", "768"))
 
 TOP_K = int(os.getenv("RAG_TOP_K", "12"))
 FINAL_CONTEXTS = int(os.getenv("RAG_FINAL_CONTEXTS", "10"))
-THRESHOLD = float(os.getenv("RAG_THRESHOLD", "0.30"))
+THRESHOLD = float(os.getenv("RAG_THRESHOLD", "0.25"))
 
-QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "true").lower() == "true"
+QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
 QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
 EXPANSION_TOP_K = int(os.getenv("EXPANSION_TOP_K", str(TOP_K)))
 

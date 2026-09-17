@@ -46,9 +46,21 @@ Pergunta: {query}"""
         response.raise_for_status()
         
         content = response.json().get("message", {}).get("content", "")
-        expansions = [line.strip() for line in content.splitlines() if line.strip()]
-        expansions = expansions[:QUERY_EXPANSION_COUNT]
-        
+        clean_expansions = []
+        for line in content.splitlines():
+            line = line.strip()
+            # Remove marcadores comuns como "1. ", "- ", etc.
+            if line.startswith(("-", "*", "•")):
+                line = line[1:].strip()
+            elif len(line) > 2 and line[0].isdigit() and line[1] in (".", ")", ":", "-"):
+                line = line[2:].strip()
+            # Ignora frases introdutórias do LLM
+            if line.lower().startswith(("aqui estão", "aqui estao", "versão", "versao", "pergunta")):
+                continue
+            if line and line != query and len(line) > 5:
+                clean_expansions.append(line)
+
+        expansions = clean_expansions[:QUERY_EXPANSION_COUNT]
         result = [query] + expansions if expansions else [query]
         _expansion_cache[cache_key] = result
         return result
@@ -108,7 +120,16 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
     
     candidates = [c for c in all_candidates.values() if c["best_score"] >= threshold]
     
-    if not candidates:
+    if not candidates and all_candidates:
+        # Fallback de tolerância para termos técnicos ou documentação em inglês (ex: PCoIP, Dante)
+        best_possible = max(c["best_score"] for c in all_candidates.values())
+        print(f"⚠️ Nenhum candidato atingiu threshold={threshold:.2f} para '{query}'. Melhor score: {best_possible:.4f}")
+        if best_possible >= 0.20:
+            print(f"   ℹ️ Ativando fallback com threshold tolerante (>= 0.20)")
+            candidates = [c for c in all_candidates.values() if c["best_score"] >= 0.20]
+        else:
+            return []
+    elif not candidates:
         return []
     
     candidates.sort(key=lambda x: (x["rrf_score"], x["appearances"], x["best_score"]), reverse=True)

@@ -21,96 +21,199 @@ def get_qdrant_client():
 
 _expansion_cache = {}
 
-# Termos de marca/software específicos para desambiguação técnica
-BRAND_KEYWORDS = {
-    "pcoip", "anyware", "anywhere", "teradici", "dante",
-    "flame", "avid", "mediacentral", "rivage", "yamaha", "audinate"
+# ============================================================
+# ENTIDADES TÉCNICAS CRÍTICAS & HIERARQUIA SEMÂNTICA
+# ============================================================
+
+# Softwares, protocolos ou equipamentos específicos de aplicação
+CRITICAL_ENTITIES = {
+    # Segurança / Antivírus
+    "kaspersky", "kesl", "ksc", "antivirus", "antivírus",
+    # Streaming / Acesso Remoto
+    "pcoip", "anyware", "anywhere", "teradici",
+    # Áudio / Protocolos IP / Consoles
+    "dante", "audinate", "rivage", "yamaha", "twinlane", "rio", "cl5", "ql5", "dm7",
+    # Broadcast / Pós-Produção / Edição / Storage
+    "flame", "autodesk", "avid", "mediacentral", "mediacomposer", "interplay", "nexis", "isis",
+    # Infraestrutura e Pipeline Específicos
+    "qdrant", "ollama", "fastapi"
 }
 
+# Plataformas / Ambientes / Sistemas Operacionais (Contexto)
+PLATFORM_KEYWORDS = {
+    "linux", "rocky", "centos", "redhat", "rhel", "almalinux",
+    "ubuntu", "debian", "windows", "macos", "docker", "kubernetes"
+}
 
-def extract_technical_query(query: str) -> str:
-    """Extrai termos técnicos principais da pergunta para uma busca focada."""
-    # Normalização de erros de digitação comuns
+# Ações / Intenções Técnicas
+ACTION_KEYWORDS = {
+    "instalação", "instalacao", "instalar", "configuração", "configuracao", "configurar",
+    "atualização", "atualizacao", "atualizar", "erro", "falha", "latência", "latencia",
+    "problema", "solucionar", "troubleshooting", "requisitos", "procedimento", "comandos"
+}
+
+# Manter retrocompatibilidade com código que importe BRAND_KEYWORDS
+BRAND_KEYWORDS = CRITICAL_ENTITIES
+
+
+def analyze_query_components(query: str) -> Dict:
+    """
+    Decompõe a consulta em componentes semânticos:
+    - entities: Softwares ou ferramentas de aplicação específicas (ex: Kaspersky, PCoIP)
+    - platforms: Plataformas e SOs que atuam como contexto (ex: Linux, Rocky)
+    - actions: Intenções técnicas (ex: instalação, latência)
+    - clean_tokens: Tokens sem stopwords
+    """
+    # Normalização de erros comuns de digitação
     q_norm = re.sub(r'\banywhre\b', 'anywhere', query, flags=re.IGNORECASE)
     q_norm = re.sub(r'\banywere\b', 'anywhere', q_norm, flags=re.IGNORECASE)
+
+    tokens = re.findall(r'[a-zA-Z0-9_\-\.]{2,}', q_norm)
 
     stopwords = {
         "como", "para", "posso", "pode", "qual", "quais", "onde", "quando", "quem",
         "esse", "essa", "este", "esta", "com", "sem", "por", "que", "uma", "uns",
         "das", "dos", "nas", "nos", "sobre", "qualquer", "mais", "menos", "acessar",
-        "configurar", "instalar", "fazer", "existe", "são", "sao", "nele", "dela",
-        "dele", "ela", "ele", "seus", "suas", "meu", "minha", "você", "voce",
-        "procedimento", "processo", "comandos", "passos"
+        "fazer", "existe", "são", "sao", "nele", "dela", "dele", "ela", "ele",
+        "seus", "suas", "meu", "minha", "você", "voce", "passos"
     }
-    words = [w for w in re.findall(r'[a-zA-Z0-9_\-\.]{2,}', q_norm) if w.lower() not in stopwords]
-    return " ".join(words) if words else query
+
+    entities = []
+    platforms = []
+    actions = []
+    other_terms = []
+
+    for t in tokens:
+        tl = t.lower()
+        if tl in stopwords:
+            continue
+        if tl in CRITICAL_ENTITIES:
+            entities.append(t)
+        elif tl in PLATFORM_KEYWORDS:
+            platforms.append(t)
+        elif tl in ACTION_KEYWORDS:
+            actions.append(t)
+        else:
+            # Detecta siglas técnicas ou termos em maiúscula/CamelCase (ex: KESL, CUDA)
+            if len(t) >= 3 and (t.isupper() or any(c.isupper() for c in t[1:])):
+                entities.append(t)
+            else:
+                other_terms.append(t)
+
+    clean_tokens = [t for t in tokens if t.lower() not in stopwords]
+
+    return {
+        "entities": entities,
+        "platforms": platforms,
+        "actions": actions,
+        "other_terms": other_terms,
+        "clean_tokens": clean_tokens
+    }
 
 
-def expand_query(query: str) -> List[str]:
-    """Gera consultas complementares: a pergunta original + consulta técnica focada."""
-    tech_query = extract_technical_query(query)
-    base_queries = [query]
-    if tech_query and tech_query.lower() != query.lower():
-        base_queries.append(tech_query)
+def extract_technical_query(query: str) -> str:
+    """Extrai termos técnicos principais da pergunta para busca concentrada."""
+    comp = analyze_query_components(query)
+    return " ".join(comp["clean_tokens"]) if comp["clean_tokens"] else query
 
-    if not QUERY_EXPANSION_ENABLED:
-        return base_queries
 
-    cache_key = f"expand_{query}"
-    if cache_key in _expansion_cache:
-        return _expansion_cache[cache_key]
+def generate_search_queries(query: str) -> List[str]:
+    """
+    Gera representações complementares da intenção de busca para evitar Semantic Drift:
+    1. Query Original completa: preserva sintaxe e nuances naturais.
+    2. Query Canônica: termos limpos sem stopwords (ex: 'instalação Kaspersky Linux').
+    3. Query Focada na Entidade: Entidade + Ação (ex: 'Kaspersky instalação')
+       -> Crucial: remove termos generalistas de alta frequência como 'Linux' para impedir
+          que enciclopédias gerais sufoquem o manual específico do software.
+    """
+    comp = analyze_query_components(query)
+    queries = [query]
 
-    prompt = f"""Gere {QUERY_EXPANSION_COUNT} versões alternativas da pergunta abaixo.
+    # 2. Query Canônica (termos essenciais limpos)
+    canonical = " ".join(comp["clean_tokens"])
+    if canonical and canonical.lower() != query.lower():
+        queries.append(canonical)
+
+    # 3. Query Focada na Entidade (Entity Focus)
+    if comp["entities"]:
+        # Se temos uma entidade de aplicação específica (ex: Kaspersky),
+        # montamos uma busca isolada: Entidade + Ações (sem a plataforma ampla que dilui o vetor)
+        entity_parts = comp["entities"] + comp["actions"]
+        if comp["platforms"] and entity_parts:
+            focused = " ".join(entity_parts)
+            if focused.lower() not in [q.lower() for q in queries]:
+                queries.append(focused)
+    elif comp["platforms"] and comp["actions"]:
+        # Quando a plataforma é o único sujeito (ex: 'particionar disco no Linux'):
+        plat_focused = " ".join(comp["platforms"] + comp["actions"])
+        if plat_focused.lower() not in [q.lower() for q in queries]:
+            queries.append(plat_focused)
+
+    # LLM Query Expansion (se habilitado nas configs)
+    if QUERY_EXPANSION_ENABLED:
+        cache_key = f"expand_{query}"
+        if cache_key in _expansion_cache:
+            return _expansion_cache[cache_key]
+
+        prompt = f"""Gere {QUERY_EXPANSION_COUNT} versões alternativas da pergunta abaixo.
 Mantenha o significado técnico. Uma por linha.
 
 Pergunta: {query}"""
 
-    try:
-        response = requests.post(
-            f"{OLLAMA_CHAT_URL}",
-            json={
-                "model": QUERY_EXPANSION_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "options": {"temperature": 0.2}
-            },
-            timeout=30
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                f"{OLLAMA_CHAT_URL}",
+                json={
+                    "model": QUERY_EXPANSION_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {"temperature": 0.2}
+                },
+                timeout=30
+            )
+            response.raise_for_status()
 
-        content = response.json().get("message", {}).get("content", "")
-        clean_expansions = []
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith(("-", "*", "•")):
-                line = line[1:].strip()
-            elif len(line) > 2 and line[0].isdigit() and line[1] in (".", ")", ":", "-"):
-                line = line[2:].strip()
-            if line.lower().startswith(("aqui estão", "aqui estao", "versão", "versao", "pergunta")):
-                continue
-            if line and line != query and len(line) > 5:
-                clean_expansions.append(line)
+            content = response.json().get("message", {}).get("content", "")
+            clean_expansions = []
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith(("-", "*", "•")):
+                    line = line[1:].strip()
+                elif len(line) > 2 and line[0].isdigit() and line[1] in (".", ")", ":", "-"):
+                    line = line[2:].strip()
+                if line.lower().startswith(("aqui estão", "aqui estao", "versão", "versao", "pergunta")):
+                    continue
+                if line and line != query and len(line) > 5:
+                    clean_expansions.append(line)
 
-        expansions = clean_expansions[:QUERY_EXPANSION_COUNT]
-        result = base_queries + expansions if expansions else base_queries
-        _expansion_cache[cache_key] = result
-        return result
+            expansions = clean_expansions[:QUERY_EXPANSION_COUNT]
+            result = queries + expansions if expansions else queries
+            _expansion_cache[cache_key] = result
+            return result
+        except Exception as e:
+            print(f"⚠️ Query expansion LLM falhou: {e}")
 
-    except Exception as e:
-        print(f"⚠️ Query expansion LLM falhou: {e}")
-        return base_queries
+    return queries
+
+
+# Alias retrocompatível
+expand_query = generate_search_queries
 
 
 def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dict]:
+    """
+    Recupera contextos relevantes através de busca vetorial multi-representação (Multi-Query),
+    fusão RRF, desambiguação léxica com proteção de entidade e diversidade documental.
+    """
     top_k = top_k if top_k is not None else TOP_K
     threshold = threshold if threshold is not None else THRESHOLD
-    queries = expand_query(query)
+    queries = generate_search_queries(query)
 
     all_candidates = {}
     client = get_qdrant_client()
 
     for current_query in queries:
-        query_embedding = get_embedding(current_query).tolist()
+        query_embedding = get_embedding(current_query, task_type="query").tolist()
 
         try:
             result = client.query_points(
@@ -146,13 +249,16 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
             candidate["appearances"] += 1
             candidate["best_score"] = max(candidate["best_score"], float(point.score))
 
-    # Identifica marcas/softwares específicos citados na pergunta
-    query_lower = query.lower()
-    target_brands = {b for b in BRAND_KEYWORDS if b in query_lower}
+    comp = analyze_query_components(query)
 
-    # Extrai termos técnicos da pergunta
-    stopwords = {"como", "para", "posso", "pode", "qual", "quais", "onde", "quando", "quem", "esse", "essa", "este", "esta", "com", "sem", "por", "que", "uma", "uns", "das", "dos", "nas", "nos", "sobre", "qualquer", "mais", "menos", "acessar", "configurar", "instalar", "fazer"}
-    query_terms = [w for w in re.findall(r'[a-zA-Z0-9_\-\.]{3,}', query_lower) if w not in stopwords]
+    # Identifica entidades críticas alvo presentes na pergunta:
+    # 1. Se houver entidades de software/aplicação específicas (ex: Kaspersky, PCoIP), elas são prioritárias.
+    # 2. Se não houver entidade de aplicação mas houver plataforma (ex: Rocky Linux), a plataforma vira alvo.
+    target_entities = [e.lower() for e in comp["entities"]]
+    if not target_entities and comp["platforms"]:
+        target_entities = [p.lower() for p in comp["platforms"]]
+
+    query_terms = [t.lower() for t in comp["clean_tokens"]]
 
     RRF_K = 60
     for item in all_candidates.values():
@@ -160,8 +266,11 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
         doc_str = (item.get("document") or "").lower()
         text_str = (item.get("text") or "").lower()
 
-        # Verifica se o chunk ou documento contém a marca/software perguntado
-        item["brand_match"] = any(b in doc_str or b in text_str for b in target_brands) if target_brands else False
+        # Proteção e Prioridade Absoluta de Entidade Crítica:
+        # Se a pergunta citar 'Kaspersky' ou 'PCoIP', chunks que contêm essa entidade
+        # ganham prioridade absoluta sobre chunks puramente contextuais (ex: só 'Linux').
+        item["entity_match"] = any(e in doc_str or e in text_str for e in target_entities) if target_entities else False
+        item["brand_match"] = item["entity_match"]  # Compatibilidade interna
         item["keyword_hits"] = sum(1 for term in query_terms if term in doc_str or term in text_str)
 
     candidates = [c for c in all_candidates.values() if c["best_score"] >= threshold]
@@ -177,14 +286,17 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
     elif not candidates:
         return []
 
-    # Ordenação prioritária:
-    # 1. Correspondência direta com o software específico perguntado (ex: PCoIP, Dante, Flame)
-    # 2. Quantidade de palavras-chave coincidentes
-    # 3. Score RRF (combinação das buscas)
-    # 4. Melhores scores brutos
+    # ========================================================
+    # ORDENAÇÃO PRIORITÁRIA HÍBRIDA:
+    # 1. Chunks que contêm a entidade de aplicação específica (ex: Kaspersky, PCoIP)
+    # 2. Chunks com mais termos coincidentes da pergunta (keyword hits)
+    # 3. Score RRF (combinação ponderada das buscas original, canônica e focada)
+    # 4. Número de aparições nas buscas
+    # 5. Score bruto de similaridade
+    # ========================================================
     candidates.sort(
         key=lambda x: (
-            x.get("brand_match", False),
+            x.get("entity_match", False),
             x["keyword_hits"] > 0,
             x["keyword_hits"],
             x["rrf_score"],

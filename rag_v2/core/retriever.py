@@ -1,13 +1,16 @@
+import os
+import json
 import re
 import requests
-from typing import List, Dict
+from typing import List, Dict, Set
 from qdrant_client import QdrantClient
 from .config import (
     QDRANT_URL, QDRANT_COLLECTION,
     TOP_K, FINAL_CONTEXTS, THRESHOLD,
     MAX_CHUNKS_PER_DOCUMENT,
     QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT,
-    QUERY_EXPANSION_MODEL, OLLAMA_CHAT_URL
+    QUERY_EXPANSION_MODEL, OLLAMA_CHAT_URL,
+    DATA_ROOT
 )
 from .embeddings import get_embedding
 
@@ -20,49 +23,129 @@ def get_qdrant_client():
     return _qdrant_client
 
 _expansion_cache = {}
+_corpus_doc_keywords = None
 
 # ============================================================
-# ENTIDADES TÉCNICAS CRÍTICAS & HIERARQUIA SEMÂNTICA
+# TAXONOMIA UNIVERSAL DE SISTEMAS OPERACIONAIS & INFRAESTRUTURA
+# (Funciona de forma idêntica para qualquer SO: Linux, Windows, macOS, etc.)
 # ============================================================
 
-# Softwares, protocolos ou equipamentos específicos de aplicação
+PLATFORM_KEYWORDS = {
+    # Distribuições Linux & Ambientes Unix
+    "linux", "rocky", "centos", "redhat", "rhel", "almalinux", "fedora",
+    "debian", "ubuntu", "arch", "suse", "opensuse", "gentoo", "alpine",
+    "unix", "bsd", "freebsd", "openbsd", "solaris",
+    # Microsoft Windows
+    "windows", "win10", "win11", "winserver", "windowsserver", "powershell", "wsl",
+    # Apple macOS
+    "macos", "osx", "darwin", "ios", "ipados",
+    # Virtualização, Containers & Nuvem
+    "docker", "podman", "kubernetes", "k8s", "vmware", "esxi", "proxmox",
+    "hyper-v", "hyperv", "kvm", "xen", "aws", "azure", "gcp"
+}
+
+# Ações técnicas universais (em português e inglês)
+ACTION_KEYWORDS = {
+    # Ciclo de Vida e Instalação
+    "instalação", "instalacao", "instalar", "instalado", "instalando", "setup", "deploy", "deployment",
+    "atualização", "atualizacao", "atualizar", "upgrade", "update", "patch", "patching",
+    "desinstalação", "desinstalacao", "desinstalar", "remoção", "remocao", "remover", "uninstall",
+    # Configuração & Administração
+    "configuração", "configuracao", "configurar", "ajuste", "ajustar", "tuning", "procedimento",
+    "processo", "passo", "passos", "etapas", "requisitos", "requisito", "prerequisites", "pré-requisitos",
+    "guia", "manual", "comandos", "comando", "sintaxe", "syntax", "script", "automatizar",
+    # Problemas, Falhas e Diagnóstico
+    "erro", "erros", "falha", "falhas", "bug", "crash", "travamento", "travar",
+    "latência", "latencia", "lentidão", "lentidao", "timeout", "perda", "pacotes", "drop",
+    "problema", "problemas", "solucionar", "solução", "solucao", "resolução", "resolucao",
+    "troubleshooting", "diagnóstico", "diagnostico", "analisar", "verificar", "status", "healthcheck",
+    # Operações de Disco, Rede e Permissões
+    "particionamento", "particionar", "disco", "formatar", "formatação", "montar", "mount", "fstab",
+    "boot", "inicialização", "inicializacao", "reiniciar", "reboot", "shutdown",
+    "backup", "restauração", "restauracao", "restore", "recuperação", "recuperacao", "snapshot",
+    "rede", "network", "porta", "portas", "ip", "subnet", "rota", "dns", "dhcp",
+    "firewall", "iptables", "nftables", "ufw", "firewalld",
+    "permissão", "permissao", "permissões", "permissoes", "chmod", "chown", "sudo", "root",
+    "admin", "administrador", "login", "acesso", "sso", "ldap", "active directory", "ad",
+    "ssl", "tls", "certificado"
+}
+
+# Termos de software/protocolos conhecidos do ambiente
 CRITICAL_ENTITIES = {
-    # Segurança / Antivírus
-    "kaspersky", "kesl", "ksc", "antivirus", "antivírus",
-    # Streaming / Acesso Remoto
-    "pcoip", "anyware", "anywhere", "teradici",
-    # Áudio / Protocolos IP / Consoles
+    # Segurança & Antivírus
+    "kaspersky", "kesl", "ksc", "antivirus", "antivírus", "clamav", "crowdstrike", "sentinelone",
+    # Streaming & Acesso Remoto
+    "pcoip", "anyware", "anywhere", "teradici", "teamviewer", "anydesk", "parsec", "rdp", "vnc",
+    # Broadcast Áudio & IP
     "dante", "audinate", "rivage", "yamaha", "twinlane", "rio", "cl5", "ql5", "dm7",
-    # Broadcast / Pós-Produção / Edição / Storage
-    "flame", "autodesk", "avid", "mediacentral", "mediacomposer", "interplay", "nexis", "isis",
-    # Infraestrutura e Pipeline Específicos
+    "aes67", "smpte", "st2110", "st2022", "ptp",
+    # Broadcast Vídeo, Edição & Pós-Produção
+    "flame", "autodesk", "maya", "3dsmax", "avid", "mediacentral", "mediacomposer",
+    "interplay", "nexis", "isis", "davinci", "resolve", "nuke", "premiere", "aftereffects",
+    # Armazenamento, Backup & Infraestrutura
+    "bacula", "veeam", "networker", "commvault", "zabbix", "grafana", "prometheus",
+    "nginx", "apache", "haproxy", "postfix", "samba", "sssd", "nfs", "iscsi", "lvm",
+    # Pipeline IA & Web
     "qdrant", "ollama", "fastapi"
 }
 
-# Plataformas / Ambientes / Sistemas Operacionais (Contexto)
-PLATFORM_KEYWORDS = {
-    "linux", "rocky", "centos", "redhat", "rhel", "almalinux",
-    "ubuntu", "debian", "windows", "macos", "docker", "kubernetes"
-}
-
-# Ações / Intenções Técnicas
-ACTION_KEYWORDS = {
-    "instalação", "instalacao", "instalar", "configuração", "configuracao", "configurar",
-    "atualização", "atualizacao", "atualizar", "erro", "falha", "latência", "latencia",
-    "problema", "solucionar", "troubleshooting", "requisitos", "procedimento", "comandos"
-}
-
-# Manter retrocompatibilidade com código que importe BRAND_KEYWORDS
 BRAND_KEYWORDS = CRITICAL_ENTITIES
+
+
+def get_corpus_keywords() -> Set[str]:
+    """
+    Descobre dinamicamente palavras-chave a partir dos nomes de todos os documentos
+    armazenados na base. Assim, qualquer novo PDF adicionado (ex: 'Manual_Veeam.pdf')
+    tem seu assunto principal automaticamente catalogado sem precisar alterar código.
+    """
+    global _corpus_doc_keywords
+    if _corpus_doc_keywords is not None:
+        return _corpus_doc_keywords
+
+    keywords = set()
+    try:
+        # 1. Tenta carregar do chunks.json se disponível
+        chunks_path = os.path.join(DATA_ROOT, "database", "chunks.json")
+        docs = set()
+        if os.path.exists(chunks_path):
+            with open(chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            docs = {c.get("document", "") for c in chunks if c.get("document")}
+        else:
+            # 2. Tenta obter do Qdrant fazendo scroll de payloads
+            client = get_qdrant_client()
+            records, _ = client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                limit=1000,
+                with_payload=["document"],
+                with_vectors=False
+            )
+            docs = {r.payload.get("document", "") for r in records if r.payload and r.payload.get("document")}
+
+        stopwords_doc = {
+            "manual", "guia", "guide", "livro", "book", "apostila", "pdf", "txt", "doc",
+            "pt", "br", "en", "autor", "casa", "codigo", "volume", "vol", "edicao", "edition",
+            "referencia", "reference", "user", "operation", "admin", "administracao", "overview"
+        }
+        for doc_name in docs:
+            words = re.findall(r'[a-zA-Z0-9_\-]{3,}', doc_name.lower())
+            for w in words:
+                if w not in stopwords_doc and not w.isdigit():
+                    keywords.add(w)
+    except Exception:
+        pass
+
+    _corpus_doc_keywords = keywords
+    return _corpus_doc_keywords
 
 
 def analyze_query_components(query: str) -> Dict:
     """
-    Decompõe a consulta em componentes semânticos:
-    - entities: Softwares ou ferramentas de aplicação específicas (ex: Kaspersky, PCoIP)
-    - platforms: Plataformas e SOs que atuam como contexto (ex: Linux, Rocky)
-    - actions: Intenções técnicas (ex: instalação, latência)
-    - clean_tokens: Tokens sem stopwords
+    Decompõe a consulta de forma UNIVERSAL e DINÂMICA para qualquer software ou SO:
+    - entities: Aplicações, ferramentas, protocolos ou termos substantivos específicos
+    - platforms: Sistemas operacionais ou plataformas que funcionam como contexto (Linux, Windows, macOS, etc.)
+    - actions: Intenções ou ações técnicas (instalação, configuração, erro, etc.)
+    - clean_tokens: Todos os termos substantivos sem stopwords
     """
     # Normalização de erros comuns de digitação
     q_norm = re.sub(r'\banywhre\b', 'anywhere', query, flags=re.IGNORECASE)
@@ -72,11 +155,15 @@ def analyze_query_components(query: str) -> Dict:
 
     stopwords = {
         "como", "para", "posso", "pode", "qual", "quais", "onde", "quando", "quem",
-        "esse", "essa", "este", "esta", "com", "sem", "por", "que", "uma", "uns",
-        "das", "dos", "nas", "nos", "sobre", "qualquer", "mais", "menos", "acessar",
-        "fazer", "existe", "são", "sao", "nele", "dela", "dele", "ela", "ele",
-        "seus", "suas", "meu", "minha", "você", "voce", "passos"
+        "por que", "porque", "esse", "essa", "este", "esta", "esses", "essas", "estes", "estas",
+        "aquele", "aquela", "aqueles", "aquelas", "com", "sem", "por", "que", "uma", "umas",
+        "um", "uns", "das", "dos", "nas", "nos", "sobre", "qualquer", "mais", "menos", "acessar",
+        "fazer", "existe", "são", "sao", "nele", "dela", "dele", "ela", "ele", "eles", "elas",
+        "seus", "suas", "meu", "minha", "você", "voce", "passos", "ter", "tendo", "sendo",
+        "estar", "fica", "dá", "da", "do", "de", "no", "na", "em", "ao", "aos", "à", "às"
     }
+
+    corpus_words = get_corpus_keywords()
 
     entities = []
     platforms = []
@@ -87,18 +174,17 @@ def analyze_query_components(query: str) -> Dict:
         tl = t.lower()
         if tl in stopwords:
             continue
-        if tl in CRITICAL_ENTITIES:
-            entities.append(t)
-        elif tl in PLATFORM_KEYWORDS:
+        if tl in PLATFORM_KEYWORDS:
             platforms.append(t)
         elif tl in ACTION_KEYWORDS:
             actions.append(t)
+        elif tl in CRITICAL_ENTITIES or tl in corpus_words:
+            entities.append(t)
         else:
-            # Detecta siglas técnicas ou termos em maiúscula/CamelCase (ex: KESL, CUDA)
-            if len(t) >= 3 and (t.isupper() or any(c.isupper() for c in t[1:])):
-                entities.append(t)
-            else:
-                other_terms.append(t)
+            # Princípio Universal: Qualquer substantivo técnico que NÃO seja plataforma e NÃO seja ação
+            # é, por definição, um assunto/software/ferramenta específica!
+            # Ex: maya, nuke, sssd, lvm, bacula, zabbix, fortinet, davinci, etc.
+            entities.append(t)
 
     clean_tokens = [t for t in tokens if t.lower() not in stopwords]
 
@@ -122,9 +208,9 @@ def generate_search_queries(query: str) -> List[str]:
     Gera representações complementares da intenção de busca para evitar Semantic Drift:
     1. Query Original completa: preserva sintaxe e nuances naturais.
     2. Query Canônica: termos limpos sem stopwords (ex: 'instalação Kaspersky Linux').
-    3. Query Focada na Entidade: Entidade + Ação (ex: 'Kaspersky instalação')
-       -> Crucial: remove termos generalistas de alta frequência como 'Linux' para impedir
-          que enciclopédias gerais sufoquem o manual específico do software.
+    3. Query Focada no Assunto / Software: Assunto + Ação (ex: 'Kaspersky instalação')
+       -> Crucial: remove termos generalistas de alta frequência como 'Linux' ou 'Windows'
+          para impedir que enciclopédias gerais sufoquem o manual específico do software.
     """
     comp = analyze_query_components(query)
     queries = [query]
@@ -134,17 +220,17 @@ def generate_search_queries(query: str) -> List[str]:
     if canonical and canonical.lower() != query.lower():
         queries.append(canonical)
 
-    # 3. Query Focada na Entidade (Entity Focus)
+    # 3. Query Focada no Assunto / Entidade (Universal Subject Focus)
     if comp["entities"]:
-        # Se temos uma entidade de aplicação específica (ex: Kaspersky),
-        # montamos uma busca isolada: Entidade + Ações (sem a plataforma ampla que dilui o vetor)
+        # Se temos uma ferramenta ou software específico (ex: Maya, Nuke, Kaspersky, SSSD, LVM):
+        # Montamos busca isolada: Entidade + Ações (sem a plataforma ampla que atrai livros gerais)
         entity_parts = comp["entities"] + comp["actions"]
         if comp["platforms"] and entity_parts:
             focused = " ".join(entity_parts)
             if focused.lower() not in [q.lower() for q in queries]:
                 queries.append(focused)
     elif comp["platforms"] and comp["actions"]:
-        # Quando a plataforma é o único sujeito (ex: 'particionar disco no Linux'):
+        # Quando a plataforma é o único sujeito (ex: 'particionar disco no Linux' ou 'firewall no Windows'):
         plat_focused = " ".join(comp["platforms"] + comp["actions"])
         if plat_focused.lower() not in [q.lower() for q in queries]:
             queries.append(plat_focused)

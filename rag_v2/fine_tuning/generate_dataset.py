@@ -325,15 +325,34 @@ LIMITACOES:
 # FUNÇÕES DE EXTRAÇÃO E SÍNTESE
 # ==============================================================================
 
+def extract_text_from_pdf(pdf_path: Path, max_pages: int = 15) -> str:
+    """Extrai texto de arquivo PDF usando PyMuPDF (fitz) se disponível."""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(str(pdf_path))
+        text_parts = []
+        for i in range(min(len(doc), max_pages)):
+            page_text = doc[i].get_text()
+            if page_text.strip():
+                text_parts.append(page_text)
+        return "\n\n".join(text_parts)
+    except Exception as e:
+        logger.debug(f"Não foi possível extrair PDF {pdf_path}: {e}")
+        return ""
+
+
 def load_documents_from_dir(docs_dir: Path) -> List[Dict]:
-    """Lê arquivos markdown, texto ou KBs locais."""
+    """Lê arquivos markdown, texto ou PDFs locais."""
     docs = []
     if not docs_dir.exists():
         logger.warning(f"Diretório de documentos não encontrado: {docs_dir}")
         return docs
 
     for file_path in docs_dir.glob("**/*"):
-        if file_path.is_file() and file_path.suffix.lower() in [".md", ".txt"]:
+        if not file_path.is_file():
+            continue
+        ext = file_path.suffix.lower()
+        if ext in [".md", ".txt"]:
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore").strip()
                 if len(content) > 100:
@@ -344,7 +363,40 @@ def load_documents_from_dir(docs_dir: Path) -> List[Dict]:
                     })
             except Exception as e:
                 logger.error(f"Erro ao ler {file_path}: {e}")
+        elif ext == ".pdf":
+            content = extract_text_from_pdf(file_path)
+            if len(content) > 200:
+                docs.append({
+                    "name": file_path.name,
+                    "path": str(file_path),
+                    "text": content
+                })
     return docs
+
+
+def load_chunks_from_file(chunks_file: Path, limit: int = 200) -> List[Dict]:
+    """Lê trechos já extraídos e limpos de chunks.json (do RAG V1/V2)."""
+    if not chunks_file.exists():
+        logger.warning(f"Arquivo chunks.json não encontrado em: {chunks_file}")
+        return []
+    try:
+        with open(chunks_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        chunks = []
+        items = data if isinstance(data, list) else list(data.values())
+        logger.info(f"Carregando chunks de {chunks_file} (total no arquivo: {len(items)}, limite: {limit})...")
+        for item in items[:limit]:
+            text = (item.get("text") or item.get("content") or "").strip()
+            if len(text) > 200:
+                chunks.append({
+                    "name": item.get("document", "chunk"),
+                    "page": item.get("page", 1),
+                    "text": text
+                })
+        return chunks
+    except Exception as e:
+        logger.error(f"Erro ao carregar chunks de {chunks_file}: {e}")
+        return []
 
 
 def load_chunks_from_qdrant(limit: int = 100) -> List[Dict]:
@@ -437,10 +489,12 @@ def format_to_chatml(system_prompt: str, user_query: str, assistant_response: st
 
 def main():
     parser = argparse.ArgumentParser(description="FOCUS AI - Gerador de Dataset para Fine-Tuning")
-    parser.add_argument("--source", choices=["files", "qdrant", "seeds-only", "all"], default="files",
-                        help="Fonte de dados para extração (padrão: files)")
+    parser.add_argument("--source", choices=["files", "chunks", "qdrant", "seeds-only", "all"], default="chunks",
+                        help="Fonte: 'chunks' (chunks.json da V1/V2), 'files' (diretório de PDFs/MDs), 'qdrant', 'seeds-only' ou 'all'")
     parser.add_argument("--docs-dir", type=str, default=None,
-                        help="Diretório de documentos/markdows (padrão: rag_v2/data/documents)")
+                        help="Diretório de documentos/manuais (ex: /opt/ai/rag/documents)")
+    parser.add_argument("--chunks-file", type=str, default=None,
+                        help="Caminho para chunks.json (padrão: /opt/ai/rag/database/chunks.json)")
     parser.add_argument("--output", type=str, default=None,
                         help="Caminho do arquivo .jsonl gerado")
     parser.add_argument("--model", type=str, default=DEFAULT_LLM_MODEL,
@@ -478,14 +532,43 @@ def main():
 
     # 2. Carrega trechos de documentos
     docs_to_process = []
-    if args.source in ["files", "all"]:
-        default_dir = Path(PROJECT_ROOT) / "data" / "documents"
-        if not default_dir.exists():
-            default_dir = Path(__file__).resolve().parent.parent / "data" / "documents"
-        docs_dir = Path(args.docs_dir) if args.docs_dir else default_dir
-        logger.info(f"Buscando manuais e documentos em: {docs_dir}")
-        docs_to_process.extend(load_documents_from_dir(docs_dir))
 
+    # Opção A: chunks.json (Mais rápido e já processado)
+    if args.source in ["chunks", "all"]:
+        candidate_chunks = [
+            Path(args.chunks_file) if args.chunks_file else None,
+            Path(DATA_ROOT) / "database" / "chunks.json",
+            Path(PROJECT_ROOT) / "data" / "database" / "chunks.json",
+            Path("/opt/ai/rag/database/chunks.json"),
+        ]
+        chosen_chunks = next((p for p in candidate_chunks if p and p.exists()), None)
+        if chosen_chunks:
+            logger.info(f"Utilizando chunks processados de: {chosen_chunks}")
+            docs_to_process.extend(load_chunks_from_file(chosen_chunks, limit=args.max_samples))
+        else:
+            logger.warning("Nenhum chunks.json encontrado nos caminhos padrão.")
+
+    # Opção B: arquivos diretos (PDFs, Markdown, etc.)
+    if args.source in ["files", "all"]:
+        candidate_dirs = []
+        if args.docs_dir:
+            candidate_dirs.append(Path(args.docs_dir))
+        else:
+            candidate_dirs.extend([
+                Path(DATA_ROOT) / "documents",
+                Path(PROJECT_ROOT) / "data" / "documents",
+                Path("/opt/ai/rag/documents"),
+                Path(__file__).resolve().parent.parent / "data" / "documents",
+            ])
+
+        scanned_dirs = set()
+        for d in candidate_dirs:
+            if d.exists() and str(d.resolve()) not in scanned_dirs:
+                scanned_dirs.add(str(d.resolve()))
+                logger.info(f"Buscando manuais e documentos em: {d}")
+                docs_to_process.extend(load_documents_from_dir(d))
+
+    # Opção C: Qdrant
     if args.source in ["qdrant", "all"]:
         logger.info(f"Buscando chunks do Qdrant ({QDRANT_COLLECTION})...")
         docs_to_process.extend(load_chunks_from_qdrant(limit=args.max_samples))

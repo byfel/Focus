@@ -1,29 +1,43 @@
 #!/usr/bin/env python3
 """
-FOCUS AI - Sintetizador de Dataset para Fine-Tuning de Solucionador de Mídia.
+FOCUS AI - Sintetizador Incremental de Dataset para Fine-Tuning de Solucionador de Mídia.
 
-Transforma manuais técnicos, KBs (Markdown/PDFs) e chunks do Qdrant em pares
-instrucionais de treinamento (ChatML / JSONL) estruturados sob a metodologia rigorosa
-de troubleshooting de broadcast e pós-produção (TSHOOT / Root Cause Analysis).
+Transforma TODOS os manuais técnicos, KBs (Markdown/PDFs) e chunks (chunks.json / Qdrant)
+em pares instrucionais de treinamento (ChatML / JSONL) estruturados sob a metodologia
+rigorosa de troubleshooting de broadcast e pós-produção (TSHOOT / Root Cause Analysis).
+
+Características principais:
+- APRENDIZADO DE TODOS OS DOCUMENTOS: Agrupa por documento e seleciona trechos
+  distribuídos ao longo de cada manual (Round-Robin entre documentos), evitando
+  concentrar o treino em apenas um PDF.
+- INCREMENTAL PARA NOVOS DOCUMENTOS: Rastreia o estado (SHA256 / file_hash e chunk_ids)
+  em `dataset/dataset_state.json`. Em novas execuções após o `ingest.py`, processa
+  automaticamente apenas os documentos novos, alterados ou que ainda não atingiram
+  a cota de exemplos por documento.
+- SALVAMENTO INCREMENTAL (CHECKPOINT): Grava cada exemplo no `.jsonl` e atualiza o
+  estado imediatamente após cada chunk, permitindo pausar (`Ctrl+C`) e retomar sem perdas.
 
 Uso:
-    # 1. Gerar dataset a partir dos documentos na pasta data/documents + seeds de mídia:
-    python3 generate_dataset.py --source files --include-seeds
+    # 1. Processamento incremental padrão (aprende de todos os docs e foca nos novos):
+    python3 generate_dataset.py --source chunks --chunks-per-doc 8
 
-    # 2. Gerar dataset a partir dos chunks indexados no Qdrant:
-    python3 generate_dataset.py --source qdrant --max-samples 100
+    # 2. Processar apenas documentos recém-ingeridos (ainda não presentes no estado):
+    python3 generate_dataset.py --source chunks --only-new-docs
 
     # 3. Gerar apenas o dataset semente (Gold Standard) imediatamente (sem chamar LLM):
     python3 generate_dataset.py --source seeds-only
 """
 
 import os
+import re
 import sys
 import json
+import time
+import hashlib
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 # Tenta carregar configurações do FOCUS v2 se disponível
 try:
@@ -67,31 +81,32 @@ Responda sempre em português técnico, objetivo, com alto rigor de engenharia."
 
 SYNTHESIZER_PROMPT_TEMPLATE = """Você é um Engenheiro Sênior de Mídia e IA encarregado de criar casos de treinamento supervisionado (Fine-Tuning) para um assistente técnico de estúdios e broadcast.
 
+Documento de origem: {doc_name}
 Abaixo está um trecho de DOCUMENTAÇÃO TÉCNICA / MANUAL / KB:
 ----------------------------------------
 {context}
 ----------------------------------------
 
 Sua tarefa:
-Gere {count} caso(s) de suporte/troubleshooting realista(s) baseados estritamente ou inspirados nas tecnologias deste texto.
+Gere {count} caso(s) de suporte/troubleshooting ou procedimento operacional realista(s) baseados estritamente nas informações técnicas deste texto.
 Cada caso deve conter:
-1. Pergunta / Incidente do Usuário (Sintoma relatado por um operador, montador de Flame/Avid/Resolve, ou engenheiro de broadcast).
+1. Pergunta / Incidente do Usuário (Sintoma ou dúvida operacional relatada por um operador, montador de Flame/Avid/Resolve, ou engenheiro de broadcast sobre o sistema do documento '{doc_name}').
 2. Resposta do Solucionador de Mídia, rigorosamente estruturada no formato:
 
 SINTOMA:
-<descrição do problema>
+<descrição do problema ou objetivo operacional>
 
 FATOS_DOCUMENTADOS:
 - <itens extraídos do contexto>
 
 CAUSAS_DOCUMENTADAS:
-- <causas explicadas pelo texto>
+- <causas ou requisitos técnicos explicados pelo texto>
 
 COMO_CONFIRMAR:
 1. <comandos de terminal (ex: ls -la, rpm, systemctl, netstat) ou inspeção na GUI>
 
 ACAO_RECOMENDADA:
-1. <comandos de correção, symlinks, permissões, limpeza de cache ou configuração>
+1. <passo a passo completo de resolução, configuração ou operação>
 
 LIMITACOES:
 - <ressalvas técnicas se houver>
@@ -107,11 +122,11 @@ IMPORTANTE: Responda APENAS em JSON válido no seguinte formato de lista:
 
 # ==============================================================================
 # SEEDS DE OURO (GOLD STANDARD DATASET)
-# Casos reais de engenharia de broadcast e pós-produção para treino imediato
 # ==============================================================================
 
 GOLD_STANDARD_SEEDS = [
     {
+        "seed_id": "seed_sapphire_ofx_flame",
         "user_query": "Instalei o Boris FX Sapphire 2025 no Rocky Linux para o Autodesk Flame 2025, mas os nós (S_Glow, S_Blur) não aparecem no Batch. O que pode ser?",
         "assistant_response": """SINTOMA:
 O Boris FX Sapphire 2025 não aparece no Autodesk Flame 2025 (módulos Batch e Node Bin) após a instalação no Rocky Linux.
@@ -156,6 +171,7 @@ LIMITACOES:
 - Se houver conflito de licença (RLM Server Boris FX), o plugin pode carregar com marca d'água (X vermelho) em vez de ficar invisível."""
     },
     {
+        "seed_id": "seed_dante_controller_red",
         "user_query": "No Dante Controller, o nome de um dos nossos conversores de áudio está aparecendo em texto vermelho e não conseguimos rotear nenhum canal para ele. O que significa?",
         "assistant_response": """SINTOMA:
 Nome do dispositivo exibido em texto vermelho no Dante Controller, impedindo o roteamento e a subscrição de canais de áudio sobre IP.
@@ -185,6 +201,7 @@ LIMITACOES:
 - Se a rede utilizar redundância Dante (Primary e Secondary), certifique-se de que os cabos não foram invertidos entre os switches Primary e Secondary."""
     },
     {
+        "seed_id": "seed_pcoip_disconnects_linux",
         "user_query": "Nossos clientes PCoIP (HP Anyware) estão sofrendo desconexões aleatórias a cada 15 minutos ao conectar nas ilhas de edição Linux. Como investigar no terminal?",
         "assistant_response": """SINTOMA:
 Sessões de vídeo PCoIP (HP Anyware / Teradici) desconectando intermitentemente em estações de trabalho de pós-produção Linux.
@@ -233,6 +250,7 @@ LIMITACOES:
 - Se houver switches gerenciáveis com QoS desabilitado na rota, picos de tráfego de armazenamento (SAN/NAS) podem descartar pacotes UDP prioritários do PCoIP."""
     },
     {
+        "seed_id": "seed_wiretap_watchdog_bash",
         "user_query": "Preciso de um script em Bash para rodar no servidor Rocky Linux que valide se o Wiretap do Flame está ativo, teste as portas de rede e reinicie o serviço se necessário.",
         "assistant_response": """SINTOMA:
 Necessidade de automação em Bash para monitoramento, validação de portas e recuperação automática do serviço Autodesk Wiretap no Rocky Linux / CentOS.
@@ -321,11 +339,182 @@ LIMITACOES:
     }
 ]
 
+
 # ==============================================================================
-# FUNÇÕES DE EXTRAÇÃO E SÍNTESE
+# GERENCIAMENTO DE ESTADO INCREMENTAL E PERSISTÊNCIA
 # ==============================================================================
 
-def extract_text_from_pdf(pdf_path: Path, max_pages: int = 15) -> str:
+def load_dataset_state(state_file: Path) -> Dict:
+    """Carrega o estado incremental de geração de dataset."""
+    default_state = {
+        "processed_chunk_ids": {},  # chunk_id -> {"document": str, "samples": int, "timestamp": str}
+        "documents": {},            # doc_name -> {"file_hash": str, "chunks_processed": int, "samples_generated": int, "updated_at": str}
+        "seeds_added": False
+    }
+    if not state_file.exists():
+        return default_state
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for k, v in default_state.items():
+                if k not in data:
+                    data[k] = v
+            return data
+    except Exception as e:
+        logger.warning(f"Erro ao ler state file {state_file}: {e}")
+        return default_state
+
+
+def save_dataset_state(state_file: Path, state: Dict):
+    """Salva o estado incremental de geração de dataset."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = state_file.with_suffix(".tmp")
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    tmp_file.replace(state_file)
+
+
+def load_existing_jsonl(output_file: Path) -> Tuple[List[Dict], set]:
+    """
+    Carrega exemplos já existentes no arquivo .jsonl para não perder progresso anterior
+    e retorna (lista_de_exemplos, set_de_user_queries).
+    """
+    samples = []
+    seen_queries = set()
+    if not output_file.exists():
+        return samples, seen_queries
+
+    try:
+        with open(output_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                item = json.loads(line)
+                msgs = item.get("messages", [])
+                user_q = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+                if user_q and user_q not in seen_queries:
+                    seen_queries.add(user_q)
+                    samples.append(item)
+    except Exception as e:
+        logger.warning(f"Erro ao ler {output_file} existente: {e}")
+
+    return samples, seen_queries
+
+
+def append_samples_to_jsonl(output_file: Path, new_samples: List[Dict]):
+    """Adiciona novos exemplos incrementalmente ao final do arquivo .jsonl."""
+    if not new_samples:
+        return
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "a", encoding="utf-8") as f:
+        for item in new_samples:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def rewrite_jsonl(output_file: Path, all_samples: List[Dict]):
+    """Reescreve o arquivo .jsonl completo de forma atômica."""
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = output_file.with_suffix(".jsonl.tmp")
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        for item in all_samples:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    tmp_file.replace(output_file)
+
+
+# ==============================================================================
+# SELEÇÃO INTELIGENTE DE CHUNKS (TODOS OS DOCUMENTOS + PRIORIDADE A NOVOS)
+# ==============================================================================
+
+def score_chunk_relevance(text: str) -> float:
+    """
+    Pontua a densidade técnica de um chunk para priorizar páginas de conteúdo
+    técnico real (comandos, procedimentos, configurações, erros) em vez de capas/índices.
+    """
+    score = min(len(text) / 500.0, 3.0)
+    tech_Markers = [
+        r"/opt/", r"/etc/", r"/var/", r"/usr/", r"systemctl", r"chmod", r"ln -s",
+        r"erro", r"error", r"falha", r"configura", r"procedimento", r"passo",
+        r"menu", r"botão", r"porta", r"ip", r"rede", r"plugin", r"servidor",
+        r"instala", r"comando", r"terminal", r"script", r"status", r"log"
+    ]
+    for pattern in tech_Markers:
+        if re.search(pattern, text, re.IGNORECASE):
+            score += 0.6
+    # Penaliza sumários pontilhados (ex: "1. Introdução ............ 5")
+    if len(re.findall(r"\.{4,}", text)) >= 2:
+        score -= 3.0
+    return score
+
+
+def select_representative_chunks_for_doc(doc_chunks: List[Dict], max_per_doc: int) -> List[Dict]:
+    """
+    Seleciona até `max_per_doc` chunks distribuídos ao longo do documento,
+    combinando cobertura espacial (início, meio e fim do documento) e densidade técnica.
+    Se `max_per_doc <= 0` ou `len(doc_chunks) <= max_per_doc`, retorna todos os chunks válidos.
+    """
+    if max_per_doc <= 0 or len(doc_chunks) <= max_per_doc:
+        return doc_chunks
+
+    # Filtra chunks com score muito baixo (ex: índice puro) se houver suficientes
+    scored = [(score_chunk_relevance(c["text"]), idx, c) for idx, c in enumerate(doc_chunks)]
+    valid_scored = [item for item in scored if item[0] > 0]
+    pool = [item[2] for item in (valid_scored if len(valid_scored) >= max_per_doc else scored)]
+
+    if len(pool) <= max_per_doc:
+        return pool
+
+    # Divide o documento em `max_per_doc` faixas (buckets) e escolhe o chunk mais rico de cada faixa
+    selected = []
+    bucket_size = len(pool) / float(max_per_doc)
+    for i in range(max_per_doc):
+        start_idx = int(round(i * bucket_size))
+        end_idx = int(round((i + 1) * bucket_size))
+        bucket = pool[start_idx:max(end_idx, start_idx + 1)]
+        if bucket:
+            best_in_bucket = max(bucket, key=lambda c: score_chunk_relevance(c["text"]))
+            selected.append(best_in_bucket)
+
+    return selected
+
+
+def load_all_chunks_from_file(chunks_file: Path) -> List[Dict]:
+    """Lê todos os chunks válidos de chunks.json (gerado pelo ingest.py)."""
+    if not chunks_file.exists():
+        logger.warning(f"Arquivo chunks.json não encontrado em: {chunks_file}")
+        return []
+    try:
+        with open(chunks_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        items = data if isinstance(data, list) else list(data.values())
+        chunks = []
+        for idx, item in enumerate(items):
+            text = (item.get("text") or item.get("content") or "").strip()
+            if len(text) < 200:
+                continue
+            doc_name = item.get("document", "documento_desconhecido")
+            page = item.get("page", 1)
+            chunk_num = item.get("chunk", idx + 1)
+            chunk_id = item.get("chunk_id") or hashlib.sha256(
+                f"{doc_name}|{page}|{chunk_num}|{text}".encode("utf-8")
+            ).hexdigest()
+            file_hash = item.get("file_hash") or ""
+            chunks.append({
+                "chunk_id": chunk_id,
+                "name": doc_name,
+                "file_hash": file_hash,
+                "page": page,
+                "chunk": chunk_num,
+                "source_type": item.get("source_type", "text"),
+                "text": text
+            })
+        return chunks
+    except Exception as e:
+        logger.error(f"Erro ao carregar chunks de {chunks_file}: {e}")
+        return []
+
+
+def extract_text_from_pdf(pdf_path: Path, max_pages: int = 20) -> str:
     """Extrai texto de arquivo PDF usando PyMuPDF (fitz) se disponível."""
     try:
         import fitz  # PyMuPDF
@@ -342,89 +531,209 @@ def extract_text_from_pdf(pdf_path: Path, max_pages: int = 15) -> str:
 
 
 def load_documents_from_dir(docs_dir: Path) -> List[Dict]:
-    """Lê arquivos markdown, texto ou PDFs locais."""
-    docs = []
+    """Lê arquivos markdown, texto ou PDFs locais que não estejam em chunks.json."""
+    chunks = []
     if not docs_dir.exists():
-        logger.warning(f"Diretório de documentos não encontrado: {docs_dir}")
-        return docs
+        return chunks
 
-    for file_path in docs_dir.glob("**/*"):
+    for file_path in sorted(docs_dir.glob("**/*")):
         if not file_path.is_file():
             continue
         ext = file_path.suffix.lower()
+        content = ""
         if ext in [".md", ".txt"]:
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore").strip()
-                if len(content) > 100:
-                    docs.append({
-                        "name": file_path.name,
-                        "path": str(file_path),
-                        "text": content
-                    })
             except Exception as e:
                 logger.error(f"Erro ao ler {file_path}: {e}")
         elif ext == ".pdf":
             content = extract_text_from_pdf(file_path)
-            if len(content) > 200:
-                docs.append({
-                    "name": file_path.name,
-                    "path": str(file_path),
-                    "text": content
-                })
-    return docs
 
-
-def load_chunks_from_file(chunks_file: Path, limit: int = 200) -> List[Dict]:
-    """Lê trechos já extraídos e limpos de chunks.json (do RAG V1/V2)."""
-    if not chunks_file.exists():
-        logger.warning(f"Arquivo chunks.json não encontrado em: {chunks_file}")
-        return []
-    try:
-        with open(chunks_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        chunks = []
-        items = data if isinstance(data, list) else list(data.values())
-        logger.info(f"Carregando chunks de {chunks_file} (total no arquivo: {len(items)}, limite: {limit})...")
-        for item in items[:limit]:
-            text = (item.get("text") or item.get("content") or "").strip()
-            if len(text) > 200:
+        if len(content) > 200:
+            file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            # Divide textos grandes em blocos de ~2500 caracteres
+            blocks = [content[i:i + 2500] for i in range(0, len(content), 2500)]
+            for b_idx, block in enumerate(blocks, start=1):
+                if len(block.strip()) < 150:
+                    continue
+                chunk_id = hashlib.sha256(f"{file_path.name}|{b_idx}|{block}".encode("utf-8")).hexdigest()
                 chunks.append({
-                    "name": item.get("document", "chunk"),
-                    "page": item.get("page", 1),
-                    "text": text
+                    "chunk_id": chunk_id,
+                    "name": file_path.name,
+                    "file_hash": file_hash,
+                    "page": b_idx,
+                    "chunk": b_idx,
+                    "source_type": "file",
+                    "text": block
                 })
-        return chunks
-    except Exception as e:
-        logger.error(f"Erro ao carregar chunks de {chunks_file}: {e}")
-        return []
+    return chunks
 
 
-def load_chunks_from_qdrant(limit: int = 100) -> List[Dict]:
+def load_chunks_from_qdrant(limit: int = 5000) -> List[Dict]:
     """Scrolla chunks diretamente do Qdrant da base do FOCUS."""
     try:
         from qdrant_client import QdrantClient
-        client = QdrantClient(url=QDRANT_URL, timeout=10)
-        records, _ = client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False
-        )
+        client = QdrantClient(url=QDRANT_URL, timeout=15)
         chunks = []
-        for r in records:
-            p = r.payload or {}
-            text = p.get("text", "").strip()
-            if len(text) > 200:
-                chunks.append({
-                    "name": p.get("document", "qdrant_chunk"),
-                    "page": p.get("page", 1),
-                    "text": text
-                })
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                limit=min(1000, limit - len(chunks)),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            for r in records:
+                p = r.payload or {}
+                text = p.get("text", "").strip()
+                if len(text) > 200:
+                    doc_name = p.get("document", "qdrant_chunk")
+                    page = p.get("page", 1)
+                    chunk_num = p.get("chunk", 1)
+                    chunk_id = p.get("chunk_id") or hashlib.sha256(
+                        f"{doc_name}|{page}|{chunk_num}|{text}".encode("utf-8")
+                    ).hexdigest()
+                    chunks.append({
+                        "chunk_id": chunk_id,
+                        "name": doc_name,
+                        "file_hash": p.get("file_hash", ""),
+                        "page": page,
+                        "chunk": chunk_num,
+                        "source_type": p.get("source_type", "text"),
+                        "text": text
+                    })
+            if offset is None or len(chunks) >= limit:
+                break
         return chunks
     except Exception as e:
         logger.warning(f"Não foi possível conectar ao Qdrant ({QDRANT_URL}): {e}")
         return []
 
+
+def plan_incremental_work(
+    all_chunks: List[Dict],
+    state: Dict,
+    chunks_per_doc: int = 8,
+    max_samples: int = 0,
+    only_new_docs: bool = False,
+    skip_docs: Optional[List[str]] = None
+) -> Tuple[List[Dict], Dict[str, str]]:
+    """
+    Agrupa todos os chunks por documento, analisa o estado incremental (igual ao ingest.py)
+    e constrói a fila de processamento intercalada (Round-Robin) priorizando documentos novos!
+    """
+    skip_set = set(skip_docs or [])
+    by_doc: Dict[str, List[Dict]] = {}
+    for ch in all_chunks:
+        by_doc.setdefault(ch["name"], []).append(ch)
+
+    processed_chunk_ids = state.get("processed_chunk_ids", {})
+    doc_states = state.get("documents", {})
+
+    doc_status_report: Dict[str, str] = {}
+    new_docs_queues: Dict[str, List[Dict]] = {}
+    partial_docs_queues: Dict[str, List[Dict]] = {}
+
+    print("\n" + "=" * 75)
+    print("📋 ANÁLISE INCREMENTAL DE DOCUMENTOS PARA FINE-TUNING")
+    print("=" * 75)
+
+    for doc_name in sorted(by_doc.keys()):
+        doc_chunks = by_doc[doc_name]
+        current_hash = next((c["file_hash"] for c in doc_chunks if c.get("file_hash")), "")
+
+        if doc_name in skip_set:
+            doc_status_report[doc_name] = "IGNORADO (--skip-docs)"
+            continue
+
+        prev_doc_info = doc_states.get(doc_name)
+        prev_hash = prev_doc_info.get("file_hash", "") if prev_doc_info else ""
+        already_done_for_doc = sum(
+            1 for c in doc_chunks if c["chunk_id"] in processed_chunk_ids
+        )
+        # Se foi marcado manualmente ou via estado anterior
+        recorded_done = max(
+            already_done_for_doc,
+            prev_doc_info.get("chunks_processed", 0) if (prev_doc_info and prev_hash == current_hash) else 0
+        )
+
+        # Determina meta de chunks para este documento
+        target_for_doc = len(doc_chunks) if chunks_per_doc <= 0 else min(chunks_per_doc, len(doc_chunks))
+
+        # Caso 1: Documento nunca visto antes
+        if prev_doc_info is None and already_done_for_doc == 0:
+            selected = select_representative_chunks_for_doc(doc_chunks, target_for_doc)
+            new_docs_queues[doc_name] = selected
+            doc_status_report[doc_name] = f"🆕 NOVO DOCUMENTO ({len(selected)}/{len(doc_chunks)} chunks selecionados)"
+
+        # Caso 2: Documento foi alterado (hash do PDF mudou no ingest.py)
+        elif prev_hash and current_hash and prev_hash != current_hash:
+            unprocessed = [c for c in doc_chunks if c["chunk_id"] not in processed_chunk_ids]
+            selected = select_representative_chunks_for_doc(unprocessed, target_for_doc)
+            new_docs_queues[doc_name] = selected
+            doc_status_report[doc_name] = f"♻️  DOCUMENTO ALTERADO ({len(selected)} novos chunks selecionados)"
+
+        # Caso 3: Documento já atingiu a cota de aprendizado e está inalterado
+        elif recorded_done >= target_for_doc:
+            doc_status_report[doc_name] = f"✅ JÁ APRENDIDO ({recorded_done}/{target_for_doc} chunks processados)"
+
+        # Caso 4: Documento parcialmente processado (ainda faltam chunks para atingir a meta)
+        else:
+            if only_new_docs:
+                doc_status_report[doc_name] = f"⏭️  PARCIALMENTE APRENDIDO ({recorded_done}/{target_for_doc} - pulado por --only-new-docs)"
+            else:
+                remaining_needed = target_for_doc - recorded_done
+                unprocessed = [c for c in doc_chunks if c["chunk_id"] not in processed_chunk_ids]
+                selected = select_representative_chunks_for_doc(unprocessed, remaining_needed)
+                if selected:
+                    partial_docs_queues[doc_name] = selected
+                    doc_status_report[doc_name] = f"⏳ COMPLEMENTANDO ({recorded_done} feitos, +{len(selected)} chunks)"
+                else:
+                    doc_status_report[doc_name] = f"✅ JÁ APRENDIDO ({recorded_done} chunks)"
+
+    for doc_name, status_str in doc_status_report.items():
+        print(f"  • {doc_name}: {status_str}")
+
+    # Intercala em Round-Robin: primeiro TODOS os documentos NOVOS/ALTERADOS,
+    # depois os documentos parciais (garantindo que nenhum documento fique de fora!)
+    ordered_queue: List[Dict] = []
+
+    def interleave_queues(queues_dict: Dict[str, List[Dict]]) -> List[Dict]:
+        result = []
+        active_docs = sorted(queues_dict.keys())
+        round_idx = 0
+        while True:
+            added_in_round = False
+            for d_name in active_docs:
+                q = queues_dict[d_name]
+                if round_idx < len(q):
+                    result.append(q[round_idx])
+                    added_in_round = True
+            if not added_in_round:
+                break
+            round_idx += 1
+        return result
+
+    ordered_queue.extend(interleave_queues(new_docs_queues))
+    ordered_queue.extend(interleave_queues(partial_docs_queues))
+
+    if max_samples and max_samples > 0:
+        ordered_queue = ordered_queue[:max_samples]
+
+    print("-" * 75)
+    print(f"  Total de documentos na base       : {len(by_doc)}")
+    print(f"  Documentos novos/alterados        : {len(new_docs_queues)}")
+    print(f"  Documentos complementares         : {len(partial_docs_queues)}")
+    print(f"  Chunks enfileirados nesta rodada  : {len(ordered_queue)}")
+    print("=" * 75 + "\n")
+
+    return ordered_queue, doc_status_report
+
+
+# ==============================================================================
+# SÍNTESE VIA OLLAMA
+# ==============================================================================
 
 def generate_cases_from_text(
     context_text: str,
@@ -433,7 +742,11 @@ def generate_cases_from_text(
     count: int = 2
 ) -> List[Dict]:
     """Envia o trecho do manual para o Ollama e gera casos de suporte estruturados."""
-    prompt = SYNTHESIZER_PROMPT_TEMPLATE.format(context=context_text[:3000], count=count)
+    prompt = SYNTHESIZER_PROMPT_TEMPLATE.format(
+        doc_name=doc_name,
+        context=context_text[:3000],
+        count=count
+    )
 
     try:
         response = requests.post(
@@ -441,7 +754,7 @@ def generate_cases_from_text(
             json={
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "Você é um assistente que gera dados estritamente em JSON."},
+                    {"role": "system", "content": "Você é um assistente especialista que gera datasets técnicos estritamente em JSON válido."},
                     {"role": "user", "content": prompt}
                 ],
                 "stream": False,
@@ -449,7 +762,7 @@ def generate_cases_from_text(
                     "temperature": 0.3
                 }
             },
-            timeout=120
+            timeout=180
         )
         response.raise_for_status()
         res_data = response.json()
@@ -476,9 +789,9 @@ def format_to_chatml(system_prompt: str, user_query: str, assistant_response: st
     """Formata o exemplo no padrão ChatML (padrão ouro para SFTTrainer / Hugging Face)."""
     return {
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": assistant_response}
+            {"role": "system", "content": str(system_prompt).strip()},
+            {"role": "user", "content": str(user_query).strip()},
+            {"role": "assistant", "content": str(assistant_response).strip()}
         ]
     }
 
@@ -488,7 +801,7 @@ def format_to_chatml(system_prompt: str, user_query: str, assistant_response: st
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="FOCUS AI - Gerador de Dataset para Fine-Tuning")
+    parser = argparse.ArgumentParser(description="FOCUS AI - Gerador Incremental de Dataset para Fine-Tuning")
     parser.add_argument("--source", choices=["files", "chunks", "qdrant", "seeds-only", "all"], default="chunks",
                         help="Fonte: 'chunks' (chunks.json da V1/V2), 'files' (diretório de PDFs/MDs), 'qdrant', 'seeds-only' ou 'all'")
     parser.add_argument("--docs-dir", type=str, default=None,
@@ -497,10 +810,24 @@ def main():
                         help="Caminho para chunks.json (padrão: /opt/ai/rag/database/chunks.json)")
     parser.add_argument("--output", type=str, default=None,
                         help="Caminho do arquivo .jsonl gerado")
+    parser.add_argument("--state-file", type=str, default=None,
+                        help="Caminho do arquivo de estado incremental (padrão: dataset/dataset_state.json)")
     parser.add_argument("--model", type=str, default=DEFAULT_LLM_MODEL,
                         help="Modelo do Ollama para geração sintética")
-    parser.add_argument("--max-samples", type=int, default=50,
-                        help="Número máximo de trechos a processar com o LLM")
+    parser.add_argument("--chunks-per-doc", type=int, default=8,
+                        help="Quantidade de chunks representativos por documento (0 = todos os chunks do documento). Padrão: 8")
+    parser.add_argument("--cases-per-chunk", type=int, default=2,
+                        help="Quantidade de casos de pergunta/resposta gerados por chunk. Padrão: 2")
+    parser.add_argument("--max-samples", type=int, default=0,
+                        help="Limite máximo de chunks a processar nesta execução (0 = processar todos os documentos planejados)")
+    parser.add_argument("--only-new-docs", action="store_true",
+                        help="Processar apenas documentos novos ou alterados que ainda não estão no dataset_state.json")
+    parser.add_argument("--mark-learned", type=str, nargs="*", default=None,
+                        help="Lista de nomes de documentos já aprendidos para registrar no estado sem reprocessar (ex: 'Criação de Produto no Diva V2.pdf')")
+    parser.add_argument("--skip-docs", type=str, nargs="*", default=None,
+                        help="Lista de documentos para ignorar nesta execução")
+    parser.add_argument("--recreate", action="store_true",
+                        help="Apaga o estado e recria o dataset do zero")
     parser.add_argument("--include-seeds", action="store_true", default=True,
                         help="Incluir exemplos sementes de alta qualidade (padrão: True)")
     args = parser.parse_args()
@@ -508,32 +835,49 @@ def main():
     output_dir = Path(__file__).resolve().parent / "dataset"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = Path(args.output) if args.output else output_dir / "media_solver_train.jsonl"
+    state_file = Path(args.state_file) if args.state_file else output_dir / "dataset_state.json"
 
-    dataset = []
+    if args.recreate:
+        logger.info("♻️  Modo --recreate ativado: reiniciando dataset e estado incremental...")
+        if output_file.exists():
+            output_file.unlink()
+        if state_file.exists():
+            state_file.unlink()
 
-    # 1. Adiciona os exemplos de ouro (Gold Standard Seeds)
+    state = load_dataset_state(state_file)
+    existing_samples, seen_queries = load_existing_jsonl(output_file)
+
+    if existing_samples:
+        logger.info(f"📂 Dataset existente carregado: {len(existing_samples)} exemplos preservados em {output_file.name}")
+
+    # 1. Garante que as Seeds de Ouro estejam presentes sem duplicar
     if args.include_seeds or args.source == "seeds-only":
-        logger.info(f"Adicionando {len(GOLD_STANDARD_SEEDS)} casos sementes de alta fidelidade...")
+        new_seed_samples = []
         for seed in GOLD_STANDARD_SEEDS:
-            chatml_sample = format_to_chatml(
-                system_prompt=SYSTEM_PROMPT,
-                user_query=seed["user_query"],
-                assistant_response=seed["assistant_response"]
-            )
-            dataset.append(chatml_sample)
+            if seed["user_query"] not in seen_queries:
+                chatml_sample = format_to_chatml(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_query=seed["user_query"],
+                    assistant_response=seed["assistant_response"]
+                )
+                new_seed_samples.append(chatml_sample)
+                existing_samples.append(chatml_sample)
+                seen_queries.add(seed["user_query"])
+
+        if new_seed_samples:
+            logger.info(f"Adicionando {len(new_seed_samples)} casos sementes de alta fidelidade...")
+            append_samples_to_jsonl(output_file, new_seed_samples)
+        state["seeds_added"] = True
+        save_dataset_state(state_file, state)
 
     if args.source == "seeds-only":
-        logger.info(f"Salvando dataset com apenas sementes ({len(dataset)} exemplos)...")
-        with open(output_file, "w", encoding="utf-8") as f:
-            for item in dataset:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-        logger.info(f"✅ Concluído! Dataset salvo em: {output_file}")
+        logger.info(f"✅ Concluído! Total de exemplos no dataset: {len(existing_samples)} ({output_file})")
         return
 
-    # 2. Carrega trechos de documentos
-    docs_to_process = []
+    # 2. Carrega todos os chunks disponíveis de todas as fontes solicitadas
+    all_chunks = []
 
-    # Opção A: chunks.json (Mais rápido e já processado)
+    # Opção A: chunks.json (gerado pelo ingest.py)
     if args.source in ["chunks", "all"]:
         candidate_chunks = [
             Path(args.chunks_file) if args.chunks_file else None,
@@ -543,64 +887,160 @@ def main():
         ]
         chosen_chunks = next((p for p in candidate_chunks if p and p.exists()), None)
         if chosen_chunks:
-            logger.info(f"Utilizando chunks processados de: {chosen_chunks}")
-            docs_to_process.extend(load_chunks_from_file(chosen_chunks, limit=args.max_samples))
+            logger.info(f"Carregando base completa de chunks: {chosen_chunks}")
+            all_chunks.extend(load_all_chunks_from_file(chosen_chunks))
         else:
             logger.warning("Nenhum chunks.json encontrado nos caminhos padrão.")
 
-    # Opção B: arquivos diretos (PDFs, Markdown, etc.)
+    # Opção B: arquivos diretos (PDFs, Markdown, etc. em data/documents)
     if args.source in ["files", "all"]:
         candidate_dirs = []
         if args.docs_dir:
             candidate_dirs.append(Path(args.docs_dir))
         else:
             candidate_dirs.extend([
-                Path(DATA_ROOT) / "documents",
-                Path(PROJECT_ROOT) / "data" / "documents",
-                Path("/opt/ai/rag/documents"),
                 Path(__file__).resolve().parent.parent / "data" / "documents",
+                Path(PROJECT_ROOT) / "data" / "documents",
+                Path(DATA_ROOT) / "documents",
+                Path("/opt/ai/rag/documents"),
             ])
 
+        known_doc_names = {c["name"] for c in all_chunks}
         scanned_dirs = set()
         for d in candidate_dirs:
             if d.exists() and str(d.resolve()) not in scanned_dirs:
                 scanned_dirs.add(str(d.resolve()))
-                logger.info(f"Buscando manuais e documentos em: {d}")
-                docs_to_process.extend(load_documents_from_dir(d))
+                logger.info(f"Verificando documentos locais em: {d}")
+                dir_chunks = load_documents_from_dir(d)
+                # Adiciona documentos locais que ainda não vieram do chunks.json (ex: .md de TSHOOT)
+                for dc in dir_chunks:
+                    if args.source == "files" or dc["name"] not in known_doc_names:
+                        all_chunks.append(dc)
 
     # Opção C: Qdrant
-    if args.source in ["qdrant", "all"]:
+    if args.source in ["qdrant", "all"] and not all_chunks:
         logger.info(f"Buscando chunks do Qdrant ({QDRANT_COLLECTION})...")
-        docs_to_process.extend(load_chunks_from_qdrant(limit=args.max_samples))
+        all_chunks.extend(load_chunks_from_qdrant(limit=10000))
 
-    if not docs_to_process:
-        logger.warning("Nenhum documento encontrado para sintetizar via LLM.")
-    else:
-        logger.info(f"Total de {len(docs_to_process)} documentos/chunks carregados. Gerando casos com {args.model}...")
+    if not all_chunks:
+        logger.warning("Nenhum documento/chunk encontrado para sintetizar.")
+        return
 
-        processed = 0
-        for doc in docs_to_process[:args.max_samples]:
-            processed += 1
-            logger.info(f"[{processed}/{min(len(docs_to_process), args.max_samples)}] Processando: {doc['name']}...")
-            cases = generate_cases_from_text(doc["text"], doc["name"], model=args.model, count=2)
+    # 3. Se o usuário passou --mark-learned, registra esses documentos como já aprendidos no estado
+    if args.mark_learned:
+        for doc_name in args.mark_learned:
+            matching = [c for c in all_chunks if c["name"] == doc_name]
+            file_hash = next((c["file_hash"] for c in matching if c.get("file_hash")), "")
+            state["documents"][doc_name] = {
+                "file_hash": file_hash,
+                "chunks_processed": len(matching) if matching else 99,
+                "samples_generated": state["documents"].get(doc_name, {}).get("samples_generated", 0),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            logger.info(f"📌 Documento marcado como já aprendido: {doc_name}")
+        save_dataset_state(state_file, state)
+
+    # 4. Planeja a fila incremental distribuída entre TODOS os documentos (priorizando novos)
+    queue, _ = plan_incremental_work(
+        all_chunks=all_chunks,
+        state=state,
+        chunks_per_doc=args.chunks_per_doc,
+        max_samples=args.max_samples,
+        only_new_docs=args.only_new_docs,
+        skip_docs=args.skip_docs
+    )
+
+    if not queue:
+        logger.info("✨ Todos os documentos da base já estão aprendidos no dataset! Nenhum chunk novo pendente.")
+        return
+
+    logger.info(f"🚀 Iniciando síntese incremental de {len(queue)} chunks com o modelo '{args.model}'...")
+    logger.info("💡 Salvamento automático ativado a cada chunk (você pode interromper com Ctrl+C sem perder dados).")
+
+    new_examples_count = 0
+    total_queue = len(queue)
+    start_time = time.time()
+
+    try:
+        for idx, doc_chunk in enumerate(queue, start=1):
+            doc_name = doc_chunk["name"]
+            chunk_id = doc_chunk["chunk_id"]
+            page = doc_chunk.get("page", 1)
+            file_hash = doc_chunk.get("file_hash", "")
+
+            elapsed = time.time() - start_time
+            avg_time = elapsed / (idx - 1) if idx > 1 else 0
+            eta_min = ((total_queue - idx + 1) * avg_time) / 60.0 if avg_time > 0 else 0
+            eta_str = f" | ETA: {eta_min:.1f} min" if idx > 1 else ""
+
+            logger.info(
+                f"[{idx}/{total_queue}] Processando: {doc_name} (Pág. {page}){eta_str}..."
+            )
+
+            cases = generate_cases_from_text(
+                context_text=doc_chunk["text"],
+                doc_name=doc_name,
+                model=args.model,
+                count=args.cases_per_chunk
+            )
+
+            chunk_samples = []
             for c in cases:
-                if "user_query" in c and "assistant_response" in c:
+                u_query = str(c.get("user_query", "")).strip()
+                a_resp = str(c.get("assistant_response", "")).strip()
+                if u_query and a_resp and u_query not in seen_queries:
                     chatml_sample = format_to_chatml(
                         system_prompt=SYSTEM_PROMPT,
-                        user_query=c["user_query"],
-                        assistant_response=c["assistant_response"]
+                        user_query=u_query,
+                        assistant_response=a_resp
                     )
-                    dataset.append(chatml_sample)
+                    chunk_samples.append(chatml_sample)
+                    existing_samples.append(chatml_sample)
+                    seen_queries.add(u_query)
 
-    logger.info(f"\n==================================================")
-    logger.info(f"Total de exemplos gerados no dataset: {len(dataset)}")
-    logger.info(f"Salvando em: {output_file}")
+            # Grava incrementalmente no .jsonl e no dataset_state.json imediatamente
+            if chunk_samples:
+                append_samples_to_jsonl(output_file, chunk_samples)
+                new_examples_count += len(chunk_samples)
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        for item in dataset:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            state["processed_chunk_ids"][chunk_id] = {
+                "document": doc_name,
+                "page": page,
+                "samples": len(chunk_samples),
+                "timestamp": now_str
+            }
 
-    logger.info(f"✅ Sucesso! Dataset pronto para o treinamento.")
+            doc_entry = state["documents"].get(doc_name, {
+                "file_hash": file_hash,
+                "chunks_processed": 0,
+                "samples_generated": 0,
+                "updated_at": now_str
+            })
+            # Se o file_hash mudou, reinicia contagem daquele doc
+            if file_hash and doc_entry.get("file_hash") and doc_entry["file_hash"] != file_hash:
+                doc_entry["chunks_processed"] = 0
+                doc_entry["samples_generated"] = 0
+
+            doc_entry["file_hash"] = file_hash or doc_entry.get("file_hash", "")
+            doc_entry["chunks_processed"] = doc_entry.get("chunks_processed", 0) + 1
+            doc_entry["samples_generated"] = doc_entry.get("samples_generated", 0) + len(chunk_samples)
+            doc_entry["updated_at"] = now_str
+            state["documents"][doc_name] = doc_entry
+
+            save_dataset_state(state_file, state)
+
+    except KeyboardInterrupt:
+        logger.warning("\n⚠️  Interrupção detectada (Ctrl+C)! Todo o progresso até o último chunk já está salvo.")
+
+    logger.info("\n" + "=" * 60)
+    logger.info(f"📊 Novos exemplos adicionados nesta execução : {new_examples_count}")
+    logger.info(f"📚 Total acumulado de exemplos no dataset    : {len(existing_samples)}")
+    logger.info(f"📄 Documentos aprendidos no estado           : {len(state.get('documents', {}))}")
+    logger.info(f"💾 Arquivo de dataset                        : {output_file}")
+    logger.info(f"🗂️  Arquivo de estado incremental            : {state_file}")
+    logger.info("=" * 60)
+    logger.info("✅ Dataset pronto para o treinamento!")
 
 
 if __name__ == "__main__":

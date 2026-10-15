@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-FOCUS AI - Treinamento de Fine-Tuning (LoRA / SFT) para Solucionador de Mídia.
+FOCUS AI - Treinamento Incremental de Fine-Tuning (LoRA / SFT) para Solucionador de Mídia.
 
 Otimizado para servidor multi-GPU com 8x NVIDIA Quadro M6000 12GB (Maxwell sm_52):
 - Precisão: FP16 (sem BF16, não suportado por Maxwell)
 - Mecanismo de Atenção: Eager / SDPA nativo (sem FlashAttention-2)
-- Multi-GPU: Suporta Hugging Face Accelerate, DDP ou device_map='auto'
-- Formato: ChatML / Messages (SFTTrainer do TRL)
+- Multi-GPU: Suporta Hugging Face Accelerate, DDP ou execução em 1 GPU
+- Aprendizado Contínuo (Incremental): Se já existir um adaptador LoRA treinado em
+  `output/lora_adapter`, retoma/refina os pesos existentes com os novos documentos,
+  e registra o hash do dataset em `output/train_state.json` para não retreinar
+  desnecessariamente se não houver documentos novos.
 
 Como executar no servidor (Exemplos):
-    # Execução em 1 GPU (para teste rápido):
+    # Execução em 1 GPU:
     python3 train.py --epochs 3 --batch-size 1
 
-    # Execução em todas as 8 GPUs (via torchrun / accelerate):
-    accelerate launch --multi_gpu --num_processes 8 train.py --epochs 5 --batch-size 1
+    # Execução em todas as 8 GPUs (via accelerate):
+    accelerate launch --multi_gpu --num_processes 8 train.py --epochs 3 --batch-size 1
 """
 
 import os
 import sys
+import json
+import time
+import hashlib
 import argparse
 import logging
 from pathlib import Path
@@ -29,11 +35,19 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 from trl import SFTTrainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("focus_train")
+
+
+def calculate_file_sha256(file_path: Path) -> str:
+    sha = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 def check_gpu_environment():
@@ -52,7 +66,7 @@ def check_gpu_environment():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FOCUS AI - Fine-Tuning de Solucionador de Mídia")
+    parser = argparse.ArgumentParser(description="FOCUS AI - Fine-Tuning Incremental de Solucionador de Mídia")
     parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
                         help="Modelo base Hugging Face (padrão: Qwen/Qwen2.5-7B-Instruct)")
     parser.add_argument("--dataset", type=str, default=None,
@@ -73,16 +87,36 @@ def main():
                         help="Rank da matriz LoRA (padrão: 16)")
     parser.add_argument("--lora-alpha", type=int, default=32,
                         help="Alpha da matriz LoRA (padrão: 32)")
+    parser.add_argument("--from-scratch", action="store_true",
+                        help="Treinar um novo adaptador LoRA do zero em vez de continuar do adaptador existente")
+    parser.add_argument("--force", action="store_true",
+                        help="Forçar treinamento mesmo que o dataset não tenha mudado desde o último treino")
     args = parser.parse_args()
 
     default_data = Path(__file__).resolve().parent / "dataset" / "media_solver_train.jsonl"
     dataset_path = Path(args.dataset) if args.dataset else default_data
     output_dir = Path(args.output_dir) if args.output_dir else Path(__file__).resolve().parent / "output" / "lora_adapter"
+    train_state_file = output_dir.parent / "train_state.json"
 
     if not dataset_path.exists():
         logger.error(f"Arquivo de dataset não encontrado: {dataset_path}")
-        logger.error("Execute primeiro: python3 generate_dataset.py --source files")
+        logger.error("Execute primeiro: python3 generate_dataset.py --source chunks")
         sys.exit(1)
+
+    dataset_hash = calculate_file_sha256(dataset_path)
+    adapter_config_file = output_dir / "adapter_config.json"
+
+    # Verifica se já treinou exatamente este dataset
+    if not args.force and adapter_config_file.exists() and train_state_file.exists():
+        try:
+            prev_state = json.loads(train_state_file.read_text(encoding="utf-8"))
+            if prev_state.get("dataset_sha256") == dataset_hash:
+                logger.info("✨ O dataset não teve novos exemplos desde o último treinamento.")
+                logger.info(f"   Último treino: {prev_state.get('timestamp')} ({prev_state.get('samples_count')} exemplos)")
+                logger.info("   Use --force caso queira retreinar mesmo assim.")
+                return
+        except Exception:
+            pass
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,10 +131,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    logger.info(f"Carregando Modelo Base em FP16 (Otimizado para Quadro M6000 / Maxwell)...")
-    # Para Maxwell sm_52:
-    # 1. torch_dtype=torch.float16 (sem bf16)
-    # 2. attn_implementation="eager" (evita FlashAttention-2 que falharia em sm_52)
+    logger.info("Carregando Modelo Base em FP16 (Otimizado para Quadro M6000 / Maxwell)...")
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch.float16,
@@ -108,7 +139,6 @@ def main():
         trust_remote_code=True,
     )
 
-    # Configuração LoRA
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.lora_r,
@@ -118,8 +148,15 @@ def main():
         bias="none",
     )
 
-    logger.info("Aplicando adaptador LoRA ao modelo...")
-    model = get_peft_model(model, peft_config)
+    if adapter_config_file.exists() and not args.from_scratch:
+        logger.info(f"♻️  Adaptador LoRA anterior encontrado em {output_dir}. Continuando aprendizado incremental...")
+        model = PeftModel.from_pretrained(model, str(output_dir), is_trainable=True)
+        peft_for_trainer = None
+    else:
+        logger.info("Aplicando novo adaptador LoRA ao modelo...")
+        model = get_peft_model(model, peft_config)
+        peft_for_trainer = peft_config
+
     model.print_trainable_parameters()
 
     # Argumentos de Treino (compatíveis com Maxwell)
@@ -139,22 +176,39 @@ def main():
         gradient_checkpointing=True,     # Economiza VRAM nas M6000 de 12GB
     )
 
-    trainer = SFTTrainer(
-        model=model,
-        train_dataset=dataset,
-        args=training_args,
-        peft_config=peft_config,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": dataset,
+        "args": training_args,
+    }
+    if peft_for_trainer is not None:
+        trainer_kwargs["peft_config"] = peft_for_trainer
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     logger.info("🚀 Iniciando treinamento supervisionado (SFT)...")
+    start_t = time.time()
     trainer.train()
+    elapsed = time.time() - start_t
 
     logger.info(f"💾 Salvando pesos finais do adaptador LoRA em: {output_dir}")
     trainer.model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
 
-    logger.info("✅ Treinamento concluído com sucesso!")
-    logger.info("Próximo passo: execute 'export_to_ollama.py' para gerar o GGUF e carregar no Ollama.")
+    # Registra estado do treinamento concluído
+    train_state = {
+        "base_model": args.base_model,
+        "dataset_path": str(dataset_path),
+        "dataset_sha256": dataset_hash,
+        "samples_count": len(dataset),
+        "epochs": args.epochs,
+        "elapsed_seconds": round(elapsed, 1),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    train_state_file.write_text(json.dumps(train_state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    logger.info(f"✅ Treinamento concluído com sucesso em {elapsed / 60:.1f} min!")
+    logger.info("Próximo passo: execute 'export_to_ollama.py' para atualizar o modelo no Ollama.")
 
 
 if __name__ == "__main__":

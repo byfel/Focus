@@ -227,6 +227,17 @@ def main():
         action="store_true",
         help="Recria a coleção do zero (apaga dados existentes)",
     )
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Executa automaticamente o Passo 5 (Fine-Tuning incremental para novos documentos) após popular",
+    )
+    parser.add_argument(
+        "--chunks-per-doc",
+        type=int,
+        default=8,
+        help="Quantidade de chunks por documento no Passo 5 de treinamento (padrão: 8)",
+    )
     args = parser.parse_args()
 
     print("=" * 70)
@@ -283,6 +294,23 @@ def main():
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
     print(f"\n📋 Manifesto salvo em: {manifest_path}")
+
+    # 7. Próximo passo: Treinamento Incremental (Etapa 5)
+    train_script = Path(__file__).resolve().parent / "train_new_docs.py"
+    if args.train:
+        import subprocess
+        print("\n🚀 Iniciando Etapa 5: Treinamento Incremental para Novos Documentos...")
+        subprocess.run([
+            sys.executable,
+            str(train_script),
+            "--chunks-per-doc",
+            str(args.chunks_per_doc),
+        ], check=False)
+    else:
+        print(
+            "\n💡 Próximo passo (Etapa 5 - Treinar modelo com os novos documentos):\n"
+            f"   python3 {train_script} --chunks-per-doc {args.chunks_per_doc}"
+        )
 
 
 if __name__ == "__main__":

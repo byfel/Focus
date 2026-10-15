@@ -1,114 +1,80 @@
-# FOCUS AI — Guia de Fine-Tuning: Solucionador de Mídia & Broadcast
+# FOCUS AI — Guia de Fine-Tuning Incremental & Pipeline de 5 Etapas
 
-Este módulo especializa Large Language Models (LLMs) para atuarem como **Engenheiros Sêniores de Mídia, Broadcast e Pós-Produção**, ensinando a metodologia rigorosa de Troubleshooting Técnico (Root Cause Analysis - RCA, identificação de Broken Symlinks, análise de pacotes RPM, validação de rotas Dante, inspeção de logs de PCoIP e automações em Bash/Python).
+Este módulo especializa Large Language Models (LLMs) para atuarem como **Engenheiros Sêniores de Mídia, Broadcast e Pós-Produção**, aprendendo continuamente com **todos os documentos da base** e atualizando o modelo sempre que **novos documentos** entram no processo de ingestão.
 
 O pipeline foi projetado especificamente para o servidor com **8x NVIDIA Quadro M6000 12GB (Maxwell sm_52)**, utilizando **FP16** e atenção nativa para máxima estabilidade e performance.
 
 ---
 
-## 📁 Estrutura de Arquivos
+## 🔄 Fluxo Completo das 5 Etapas (Para Novos Documentos)
 
+Sempre que você adicionar novos PDFs ou manuais em `/opt/ai/rag/documents/`, o processo completo agora possui **5 etapas** (todas incrementais, processando apenas o que mudou ou o que é novo):
+
+```bash
+# Etapa 1: Extração de texto e Vision dos PDFs novos/alterados -> chunks.json
+python3 /opt/ai/rag/scripts/ingest.py --scope all
+
+# Etapa 2: Geração incremental de embeddings V1 -> embeddings.json
+python3 /opt/ai/rag/scripts/embed.py
+
+# Etapa 3: Sincronização incremental com Qdrant V1 -> rag_documents
+python3 /opt/ai/rag/scripts/migrate_to_qdrant.py
+
+# Etapa 4: População incremental do Qdrant V2 (nomic-embed-text) -> rag_documents_v2
+python3 /opt/ai/rag_v2/scripts/populate_v2.py
+
+# Etapa 5 (NOVO!): Aprendizado e Fine-Tuning Incremental dos novos documentos + Deploy no Ollama
+python3 /opt/ai/rag_v2/scripts/train_new_docs.py --chunks-per-doc 8 --num-gpus 8
 ```
-rag_v2/fine_tuning/
-├── dataset/
-│   └── media_solver_train.jsonl    # Dataset supervisionado gerado (ChatML)
-├── generate_dataset.py             # Sintetizador: extrai manuais e cria casos de treino
-├── train.py                        # Script de treino LoRA (SFTTrainer + Accelerate Multi-GPU)
-├── export_to_ollama.py             # Merge LoRA -> Cria Modelfile -> Registra no Ollama
-├── requirements.txt                # Dependências Python para o servidor
-└── README.md                       # Este guia
-```
+
+> **💡 Dica:** Você também pode disparar a Etapa 5 direto pelo `populate_v2.py` usando `--train`:
+> ```bash
+> python3 /opt/ai/rag_v2/scripts/populate_v2.py --train
+> ```
+> Ou rodar **todas as 5 etapas com um único comando**:
+> ```bash
+> python3 /opt/ai/rag_v2/scripts/run_full_pipeline.py --scope all --num-gpus 8
+> ```
 
 ---
 
-## 🚀 Passo a Passo no Servidor
+## 🧠 Como Funciona o Aprendizado de Todos os Documentos
 
-### 1. Instalar as Dependências no Servidor
+Diferente de uma leitura sequencial simples que ficaria presa apenas no primeiro PDF de `chunks.json`, o [`generate_dataset.py`](file:///c:/Users/Felipe/Documents/Focus-main/rag_v2/fine_tuning/generate_dataset.py) agora:
 
-No ambiente virtual do seu servidor Linux com as GPUs:
+1. **Agrupa por Documento e Prioriza Densidade Técnica:** Seleciona trechos distribuídos do início, meio e fim de **cada documento** (`--chunks-per-doc 8` por padrão, ou `0` para processar 100% dos chunks de cada documento), ignorando sumários e capas vazias.
+2. **Ordem Intercalada (Round-Robin):** Processa 1 chunk do Documento A, 1 do Documento B, 1 do Documento C... garantindo que **todos os manuais da sua base** estejam representados no treinamento.
+3. **Estado Incremental (`dataset/dataset_state.json`):** Rastreia o `file_hash` (SHA256) e os `chunk_id`s já aprendidos de cada PDF:
+   - Documentos que já atingiram a meta aparecem como `✅ JÁ APRENDIDO` e são pulados instantaneamente.
+   - Documentos recém-adicionados no `ingest.py` aparecem como `🆕 NOVO DOCUMENTO` e têm seus casos gerados e adicionados ao dataset.
+4. **Salvamento a cada Chunk (Checkpoint):** Cada exemplo gerado é gravado imediatamente em `dataset/media_solver_train.jsonl`. Se você interromper com `Ctrl+C`, nada é perdido!
+
+---
+
+## 🛠️ Comandos Úteis do Gerador e Treinador
+
+### Aproveitando o primeiro dataset que já rodou no servidor
+Como sua primeira execução já processou o documento `"Criação de Produto no Diva V2.pdf"`, ao atualizar o script você pode marcá-lo como já aprendido para que o gerador vá direto aprender todos os **outros** documentos da base (mantendo todos os exemplos que já foram gerados no `.jsonl`):
 
 ```bash
 cd /opt/ai/rag_v2/fine_tuning
-pip install -r requirements.txt
+python3 generate_dataset.py --source all \
+    --mark-learned "Criação de Produto no Diva V2.pdf" \
+    --chunks-per-doc 8
 ```
 
----
-
-### 2. Gerar o Dataset de Treinamento
-
-O gerador pode extrair casos de três fontes:
-1. **Documentos e KBs locais** (`/opt/ai/rag_v2/data/documents/` ou `/opt/ai/rag/documents/`)
-2. **Chunks já indexados no Qdrant** (`rag_documents_v2`)
-3. **Casos Ouro de Broadcast pré-configurados** (Flame, Sapphire OFX, Dante, PCoIP, etc.)
-
-#### Opção A: Gerar a partir dos Manuais e KBs locais (Recomendado):
+### Processar apenas documentos 100% novos
 ```bash
-python3 generate_dataset.py --source files --include-seeds --max-samples 100
+python3 generate_dataset.py --source all --only-new-docs --chunks-per-doc 8
 ```
 
-#### Opção B: Gerar a partir do Qdrant:
-```bash
-python3 generate_dataset.py --source qdrant --max-samples 100
-```
-
-#### Opção C: Gerar apenas os Casos Semente imediatamente (sem chamar o LLM):
-```bash
-python3 generate_dataset.py --source seeds-only
-```
-
-O arquivo final será salvo em `dataset/media_solver_train.jsonl`.
-
----
-
-### 3. Executar o Treinamento Multi-GPU (8x Quadro M6000)
-
-O script `train.py` usa **LoRA** em **FP16** (ideal para arquitetura Maxwell):
-
-#### Execução rápida em 1 GPU (para teste de sanidade):
-```bash
-python3 train.py --epochs 3 --batch-size 1 --grad-accum 8
-```
-
-#### Execução completa distribuída nas 8 GPUs (via Accelerate / DDP):
-```bash
-accelerate launch --multi_gpu --num_processes 8 train.py \
-    --base-model "Qwen/Qwen2.5-7B-Instruct" \
-    --epochs 5 \
-    --batch-size 1 \
-    --grad-accum 4 \
-    --lr 2e-4
-```
-
-> **Nota Técnica para Quadro M6000:**  
-> - `fp16=True` e `bf16=False` já estão fixados no script.  
-> - `attn_implementation="eager"` garante compatibilidade com Compute Capability 5.2.
-
-Os pesos do adaptador serão salvos em `output/lora_adapter/`.
-
----
-
-### 4. Fundir os Pesos e Publicar no Ollama
-
-Após o término do treinamento, execute o exportador:
+### Treinamento Incremental LoRA (`train.py`)
+O [`train.py`](file:///c:/Users/Felipe/Documents/Focus-main/rag_v2/fine_tuning/train.py) verifica automaticamente se o `media_solver_train.jsonl` recebeu novos exemplos desde o último treino (`output/train_state.json`) e **continua refinando o adaptador LoRA existente** (`output/lora_adapter`) sem perder o conhecimento anterior:
 
 ```bash
-python3 export_to_ollama.py --model-name focus-media-solver
+# Em 1 GPU:
+python3 train.py --epochs 3
+
+# Nas 8 GPUs Quadro M6000:
+accelerate launch --multi_gpu --num_processes 8 train.py --epochs 3 --batch-size 1 --grad-accum 4
 ```
-
-O script automaticamente:
-1. Funde os pesos LoRA com o modelo base (`merge_and_unload`).
-2. Gera o `Modelfile` contendo o System Prompt especialista em Broadcast.
-3. Executa `ollama create focus-media-solver -f Modelfile`.
-
-Para testar no terminal:
-```bash
-ollama run focus-media-solver "O plugin Sapphire não aparece no Flame 2025 no Rocky Linux, o que fazer?"
-```
-
----
-
-### 5. Utilizar no FOCUS AI (RAG v2)
-
-O modelo `focus-media-solver` já foi adicionado aos `SUPPORTED_MODELS` no arquivo [`core/config.py`](file:///c:/Users/Felipe/Documents/Focus-main/rag_v2/core/config.py).
-
-Basta reiniciar a API Web do FOCUS ou selecioná-lo no menu dropdown de modelos na interface web!

@@ -33,6 +33,7 @@ NOMIC_SEARCH_QUERY_PREFIX = "search_query: "
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "50"))
 
 SUPPORTED_MODELS = [
+    "focus-media-solver",
     "gemma4:26b-a4b-it-q4_K_M",
     "qwen3.6:27b",
     "qwen3.6:35b",

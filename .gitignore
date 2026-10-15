@@ -59,3 +59,14 @@ env/
 # Backups locais
 *.bak
 *.bak_*
+
+
+# ============================================================
+# FINE-TUNING / MODEL WEIGHTS
+# ============================================================
+rag_v2/fine_tuning/output/
+rag_v2/fine_tuning/Modelfile
+*.safetensors
+*.gguf
+*.bin
+

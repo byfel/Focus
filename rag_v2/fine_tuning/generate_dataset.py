@@ -828,6 +828,8 @@ def main():
                         help="Lista de documentos para ignorar nesta execução")
     parser.add_argument("--recreate", action="store_true",
                         help="Apaga o estado e recria o dataset do zero")
+    parser.add_argument("--status", action="store_true",
+                        help="Apenas exibe o relatório de cobertura de todos os documentos (sem chamar o LLM)")
     parser.add_argument("--include-seeds", action="store_true", default=True,
                         help="Incluir exemplos sementes de alta qualidade (padrão: True)")
     args = parser.parse_args()
@@ -851,7 +853,7 @@ def main():
         logger.info(f"📂 Dataset existente carregado: {len(existing_samples)} exemplos preservados em {output_file.name}")
 
     # 1. Garante que as Seeds de Ouro estejam presentes sem duplicar
-    if args.include_seeds or args.source == "seeds-only":
+    if not args.status and (args.include_seeds or args.source == "seeds-only"):
         new_seed_samples = []
         for seed in GOLD_STANDARD_SEEDS:
             if seed["user_query"] not in seen_queries:
@@ -870,7 +872,7 @@ def main():
         state["seeds_added"] = True
         save_dataset_state(state_file, state)
 
-    if args.source == "seeds-only":
+    if args.source == "seeds-only" and not args.status:
         logger.info(f"✅ Concluído! Total de exemplos no dataset: {len(existing_samples)} ({output_file})")
         return
 
@@ -941,7 +943,7 @@ def main():
         save_dataset_state(state_file, state)
 
     # 4. Planeja a fila incremental distribuída entre TODOS os documentos (priorizando novos)
-    queue, _ = plan_incremental_work(
+    queue, status_report = plan_incremental_work(
         all_chunks=all_chunks,
         state=state,
         chunks_per_doc=args.chunks_per_doc,
@@ -949,6 +951,28 @@ def main():
         only_new_docs=args.only_new_docs,
         skip_docs=args.skip_docs
     )
+
+    if args.status:
+        learned_count = sum(1 for s in status_report.values() if "JÁ APRENDIDO" in s)
+        total_docs = len(status_report)
+        train_state_file = Path(__file__).resolve().parent / "output" / "train_state.json"
+        print("📊 RESUMO GERAL DE COBERTURA DO TREINAMENTO:")
+        print(f"   • Documentos 100% aprendidos no dataset : {learned_count} / {total_docs}")
+        print(f"   • Documentos pendentes / novos          : {total_docs - learned_count}")
+        print(f"   • Total de exemplos no dataset (.jsonl) : {len(existing_samples)}")
+        if train_state_file.exists():
+            try:
+                ts = json.loads(train_state_file.read_text(encoding="utf-8"))
+                current_sha = hashlib.sha256(output_file.read_bytes()).hexdigest() if output_file.exists() else ""
+                is_synced = (ts.get("dataset_sha256") == current_sha)
+                print(f"   • Último treino LoRA realizado em       : {ts.get('timestamp')} ({ts.get('samples_count')} exemplos)")
+                print(f"   • Modelo LoRA sincronizado c/ dataset?  : {'✅ SIM (100% atualizado)' if is_synced else '⚠️  NÃO (há novos exemplos no dataset ainda não treinados no LoRA)'}")
+            except Exception:
+                pass
+        else:
+            print("   • Último treino LoRA realizado em       : ⚠️  Ainda não executado (output/train_state.json ausente)")
+        print("=" * 75)
+        return
 
     if not queue:
         logger.info("✨ Todos os documentos da base já estão aprendidos no dataset! Nenhum chunk novo pendente.")

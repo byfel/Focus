@@ -89,6 +89,8 @@ def main():
                         help="Nome do modelo final no Ollama")
     parser.add_argument("--force-train", action="store_true",
                         help="Forçar execução do treinamento mesmo sem novos exemplos gerados")
+    parser.add_argument("--status", action="store_true",
+                        help="Apenas exibe o relatório de cobertura de todos os documentos e status do último treino")
     args = parser.parse_args()
 
     print("=" * 80)
@@ -107,6 +109,9 @@ def main():
         "--source", "all",
         "--chunks-per-doc", str(args.chunks_per_doc),
     ]
+    if args.status:
+        gen_cmd.append("--status")
+        sys.exit(subprocess.run(gen_cmd).returncode)
     if args.max_samples > 0:
         gen_cmd.extend(["--max-samples", str(args.max_samples)])
     if args.only_new_docs:

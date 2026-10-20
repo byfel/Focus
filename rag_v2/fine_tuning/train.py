@@ -28,6 +28,12 @@ import argparse
 import logging
 from pathlib import Path
 
+# Em servidores com 8 GPUs (ex: NVIDIA VCA 6000), a GPU 0 frequentemente possui
+# o Xorg / Watchdog Timer de display ativo (que mata kernels longos com "launch timed out")
+# ou é usada pelo Ollama. Reservamos as 7 GPUs dedicadas (1 a 7 = 84 GB VRAM) para o treino.
+if "CUDA_VISIBLE_DEVICES" not in os.environ and Path("/dev/nvidia7").exists():
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5,6,7"
+
 import torch
 from datasets import load_dataset
 from transformers import (
@@ -143,12 +149,12 @@ def main():
                         help="Passos de acumulação de gradiente (padrão: 8)")
     parser.add_argument("--lr", type=float, default=2e-4,
                         help="Learning rate (padrão: 2e-4)")
-    parser.add_argument("--max-seq-len", type=int, default=2048,
-                        help="Tamanho máximo de contexto de treino (tokens)")
-    parser.add_argument("--lora-r", type=int, default=16,
-                        help="Rank da matriz LoRA (padrão: 16)")
-    parser.add_argument("--lora-alpha", type=int, default=32,
-                        help="Alpha da matriz LoRA (padrão: 32)")
+    parser.add_argument("--max-seq-len", type=int, default=1024,
+                        help="Tamanho máximo de contexto de treino (tokens, padrão: 1024)")
+    parser.add_argument("--lora-r", type=int, default=8,
+                        help="Rank da matriz LoRA (padrão: 8)")
+    parser.add_argument("--lora-alpha", type=int, default=16,
+                        help="Alpha da matriz LoRA (padrão: 16)")
     parser.add_argument("--from-scratch", action="store_true",
                         help="Treinar um novo adaptador LoRA do zero em vez de continuar do adaptador existente")
     parser.add_argument("--force", action="store_true",
@@ -185,6 +191,20 @@ def main():
 
     check_gpu_environment()
 
+    # Detecta se a GPU é arquitetura Maxwell (sm_52, Compute Capability < 6.0):
+    # Maxwell não possui unidades FP16 nativas (FP16 é emulado em software, causando
+    # lentidão extrema, 'launch timed out' no watchdog e 'grad_norm: nan').
+    # Já em FP32 nativo (cublasSgemm), cada VCA 6000 entrega 7 TFLOPS reais sem overflow,
+    # e as 7 GPUs dedicadas somam 84 GB de VRAM (o modelo 7B ocupa ~4.3 GB por GPU).
+    is_maxwell = False
+    if torch.cuda.is_available():
+        cap_major, _ = torch.cuda.get_device_capability(0)
+        if cap_major < 6:
+            is_maxwell = True
+
+    model_dtype = torch.float32 if is_maxwell else torch.float16
+    use_fp16_amp = False if is_maxwell else True
+
     logger.info(f"Carregando dataset de: {dataset_path}")
     dataset = load_dataset("json", data_files=str(dataset_path), split="train")
     logger.info(f"Total de amostras de treino: {len(dataset)}")
@@ -194,14 +214,14 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    logger.info("Carregando Modelo Base em FP16 (Otimizado para Quadro M6000 / Maxwell)...")
+    dtype_label = "FP32 Nativo (Alta Velocidade p/ Maxwell sm_52)" if is_maxwell else "FP16"
+    logger.info(f"Carregando Modelo Base em {dtype_label}...")
     model_kwargs = {
-        "torch_dtype": torch.float16,
+        "torch_dtype": model_dtype,
         "attn_implementation": "eager",
         "trust_remote_code": True,
     }
     # Em modo não-DDP, distribui as camadas do modelo automaticamente entre as GPUs disponíveis
-    # (evita OOM de 15GB em GPUs M6000 de 12GB de VRAM)
     if os.environ.get("LOCAL_RANK") is None and torch.cuda.is_available():
         model_kwargs["device_map"] = "auto"
 
@@ -215,7 +235,7 @@ def main():
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         bias="none",
     )
 
@@ -231,21 +251,23 @@ def main():
 
     model.print_trainable_parameters()
 
-    # Argumentos de Treino (compatíveis com Maxwell)
+    # Argumentos de Treino (otimizados para Maxwell sm_52 sem watchdog timeout)
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        fp16=True,                       # FP16 ativado para as M6000
-        bf16=False,                      # BF16 desativado (não suportado em Maxwell)
+        fp16=use_fp16_amp,
+        bf16=False,
+        max_grad_norm=1.0,
         logging_steps=1,
         save_strategy="epoch",
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
-        report_to="none",                # Sem dependência de wandb/comet
-        gradient_checkpointing=True,     # Economiza VRAM nas M6000 de 12GB
+        report_to="none",
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
     trainer = SFTTrainer(

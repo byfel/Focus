@@ -1,9 +1,11 @@
 # FOCUS AI - Dependências de Fine-Tuning (Servidor Multi-GPU M6000)
 torch>=2.1.0
-transformers>=4.40.0
-peft>=0.10.0
-trl>=0.8.0
-datasets>=2.18.0
-accelerate>=0.28.0
+transformers>=4.40.0,<4.47.0
+peft>=0.10.0,<0.14.0
+trl>=0.8.6,<0.10.0
+datasets>=2.18.0,<3.0.0
+pyarrow>=15.0.0,<18.0.0
+numpy<2.0.0
+accelerate>=0.28.0,<1.0.0
 requests>=2.31.0
 qdrant-client>=1.9.0

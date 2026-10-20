@@ -50,6 +50,68 @@ def calculate_file_sha256(file_path: Path) -> str:
     return sha.hexdigest()
 
 
+def sanitize_jsonl_dataset(file_path: Path) -> int:
+    """
+    Garante que todas as linhas do .jsonl tenham 'messages' válidos e que o campo
+    'content' de cada mensagem seja sempre uma string (corrige objetos/listas aninhados).
+    Retorna a quantidade de linhas corrigidas.
+    """
+    if not file_path.exists():
+        return 0
+
+    fixed_count = 0
+    valid_lines = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line_num, raw_line in enumerate(f, start=1):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                obj = json.loads(raw_line)
+                msgs = obj.get("messages")
+                if not isinstance(msgs, list) or not msgs:
+                    fixed_count += 1
+                    continue
+                line_modified = False
+                clean_msgs = []
+                for m in msgs:
+                    if not isinstance(m, dict):
+                        line_modified = True
+                        continue
+                    role = str(m.get("role", "user")).strip()
+                    content = m.get("content", "")
+                    if not isinstance(content, str):
+                        line_modified = True
+                        if isinstance(content, dict):
+                            parts = []
+                            for k, v in content.items():
+                                if isinstance(v, list):
+                                    v_str = "\n".join(f"- {item}" for item in v)
+                                else:
+                                    v_str = str(v)
+                                parts.append(f"{k}:\n{v_str}")
+                            content = "\n\n".join(parts)
+                        elif isinstance(content, list):
+                            content = "\n".join(str(x) for x in content)
+                        else:
+                            content = str(content)
+                    clean_msgs.append({"role": role, "content": content.strip()})
+                if line_modified:
+                    fixed_count += 1
+                valid_lines.append(json.dumps({"messages": clean_msgs}, ensure_ascii=False))
+            except Exception as e:
+                logger.warning(f"Linha {line_num} inválida ignorada no dataset: {e}")
+                fixed_count += 1
+
+    if fixed_count > 0:
+        logger.info(f"🧹 Sanitizando dataset: {fixed_count} registro(s) com 'content' não-string corrigidos em {file_path.name}")
+        with open(file_path, "w", encoding="utf-8") as f:
+            for vl in valid_lines:
+                f.write(vl + "\n")
+
+    return fixed_count
+
+
 def check_gpu_environment():
     """Valida se GPUs estão disponíveis e exibe detalhes de memória."""
     if not torch.cuda.is_available():
@@ -103,6 +165,7 @@ def main():
         logger.error("Execute primeiro: python3 generate_dataset.py --source chunks")
         sys.exit(1)
 
+    sanitize_jsonl_dataset(dataset_path)
     dataset_hash = calculate_file_sha256(dataset_path)
     adapter_config_file = output_dir / "adapter_config.json"
 
@@ -132,11 +195,19 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     logger.info("Carregando Modelo Base em FP16 (Otimizado para Quadro M6000 / Maxwell)...")
+    model_kwargs = {
+        "torch_dtype": torch.float16,
+        "attn_implementation": "eager",
+        "trust_remote_code": True,
+    }
+    # Em modo não-DDP, distribui as camadas do modelo automaticamente entre as GPUs disponíveis
+    # (evita OOM de 15GB em GPUs M6000 de 12GB de VRAM)
+    if os.environ.get("LOCAL_RANK") is None and torch.cuda.is_available():
+        model_kwargs["device_map"] = "auto"
+
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
-        torch_dtype=torch.float16,
-        attn_implementation="eager",
-        trust_remote_code=True,
+        **model_kwargs,
     )
 
     peft_config = LoraConfig(
@@ -151,11 +222,12 @@ def main():
     if adapter_config_file.exists() and not args.from_scratch:
         logger.info(f"♻️  Adaptador LoRA anterior encontrado em {output_dir}. Continuando aprendizado incremental...")
         model = PeftModel.from_pretrained(model, str(output_dir), is_trainable=True)
-        peft_for_trainer = None
     else:
         logger.info("Aplicando novo adaptador LoRA ao modelo...")
         model = get_peft_model(model, peft_config)
-        peft_for_trainer = peft_config
+
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
 
     model.print_trainable_parameters()
 
@@ -176,15 +248,13 @@ def main():
         gradient_checkpointing=True,     # Economiza VRAM nas M6000 de 12GB
     )
 
-    trainer_kwargs = {
-        "model": model,
-        "train_dataset": dataset,
-        "args": training_args,
-    }
-    if peft_for_trainer is not None:
-        trainer_kwargs["peft_config"] = peft_for_trainer
-
-    trainer = SFTTrainer(**trainer_kwargs)
+    trainer = SFTTrainer(
+        model=model,
+        train_dataset=dataset,
+        args=training_args,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_seq_len,
+    )
 
     logger.info("🚀 Iniciando treinamento supervisionado (SFT)...")
     start_t = time.time()

@@ -28,11 +28,11 @@ import argparse
 import logging
 from pathlib import Path
 
-# Em servidores com 8 GPUs (ex: NVIDIA VCA 6000), a GPU 0 frequentemente possui
-# o Xorg / Watchdog Timer de display ativo (que mata kernels longos com "launch timed out")
-# ou é usada pelo Ollama. Reservamos as 7 GPUs dedicadas (1 a 7 = 84 GB VRAM) para o treino.
-if "CUDA_VISIBLE_DEVICES" not in os.environ and Path("/dev/nvidia7").exists():
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5,6,7"
+# Em servidores multi-GPU (ex: NVIDIA Quadro VCA 6000), a comunicação P2P PCIe entre
+# sockets diferentes trava em broadcast_coalesced ("the launch timed out").
+# Isolamos o treinamento na GPU 1 dedicada (12 GB VRAM) para execução limpa em 1 GPU.
+if "CUDA_VISIBLE_DEVICES" not in os.environ and Path("/dev/nvidia1").exists():
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import torch
 from datasets import load_dataset

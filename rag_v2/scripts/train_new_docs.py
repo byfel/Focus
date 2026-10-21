@@ -83,8 +83,8 @@ def main():
                         help="Número de GPUs para o treinamento LoRA (ex: 1 ou 8 para usar accelerate)")
     parser.add_argument("--epochs", type=int, default=3,
                         help="Número de épocas de treino LoRA (padrão: 3)")
-    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
-                        help="Modelo base HuggingFace para o LoRA")
+    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
+                        help="Modelo base HuggingFace para o LoRA (padrão: Qwen/Qwen2.5-1.5B-Instruct)")
     parser.add_argument("--ollama-model-name", type=str, default="focus-media-solver",
                         help="Nome do modelo final no Ollama")
     parser.add_argument("--force-train", action="store_true",

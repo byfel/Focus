@@ -108,7 +108,7 @@ def register_in_ollama(model_name: str, modelfile_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="FOCUS AI - Merge e Deploy no Ollama")
-    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
+    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
                         help="Nome do modelo base no HuggingFace")
     parser.add_argument("--adapter-dir", type=str, default=None,
                         help="Diretório onde estão os pesos LoRA (padrão: output/lora_adapter)")

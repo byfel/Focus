@@ -135,8 +135,8 @@ def check_gpu_environment():
 
 def main():
     parser = argparse.ArgumentParser(description="FOCUS AI - Fine-Tuning Incremental de Solucionador de Mídia")
-    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
-                        help="Modelo base Hugging Face (padrão: Qwen/Qwen2.5-7B-Instruct)")
+    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
+                        help="Modelo base Hugging Face (padrão: Qwen/Qwen2.5-1.5B-Instruct, otimizado para VCA 6000)")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Caminho do arquivo .jsonl gerado")
     parser.add_argument("--output-dir", type=str, default=None,
@@ -147,10 +147,10 @@ def main():
                         help="Batch size por GPU (padrão: 1 para 12GB de VRAM)")
     parser.add_argument("--grad-accum", type=int, default=8,
                         help="Passos de acumulação de gradiente (padrão: 8)")
-    parser.add_argument("--lr", type=float, default=2e-4,
-                        help="Learning rate (padrão: 2e-4)")
-    parser.add_argument("--max-seq-len", type=int, default=1024,
-                        help="Tamanho máximo de contexto de treino (tokens, padrão: 1024)")
+    parser.add_argument("--lr", type=float, default=1e-4,
+                        help="Learning rate (padrão: 1e-4)")
+    parser.add_argument("--max-seq-len", type=int, default=512,
+                        help="Tamanho máximo de contexto de treino (tokens, padrão: 512)")
     parser.add_argument("--lora-r", type=int, default=8,
                         help="Rank da matriz LoRA (padrão: 8)")
     parser.add_argument("--lora-alpha", type=int, default=16,
@@ -215,15 +215,19 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     dtype_label = "FP32 Nativo (Alta Velocidade p/ Maxwell sm_52)" if is_maxwell else "FP16"
-    logger.info(f"Carregando Modelo Base em {dtype_label}...")
+    logger.info(f"Carregando Modelo Base ({args.base_model}) em {dtype_label}...")
     model_kwargs = {
         "torch_dtype": model_dtype,
         "attn_implementation": "eager",
         "trust_remote_code": True,
     }
-    # Em modo não-DDP, distribui as camadas do modelo automaticamente entre as GPUs disponíveis
+    # Para modelos compactos (1.5B / 0.5B), aloca inteiro em 1 única GPU dedicada (sem hooks multi-GPU)
+    # evitando gargalos de P2P PCIe e bugs de gradiente NaN entre GPUs.
     if os.environ.get("LOCAL_RANK") is None and torch.cuda.is_available():
-        model_kwargs["device_map"] = "auto"
+        if any(sz in args.base_model.upper() for sz in ["0.5B", "1.5B", "1.8B"]):
+            model_kwargs["device_map"] = {"": 0}
+        else:
+            model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
@@ -246,12 +250,9 @@ def main():
         logger.info("Aplicando novo adaptador LoRA ao modelo...")
         model = get_peft_model(model, peft_config)
 
-    if hasattr(model, "enable_input_require_grads"):
-        model.enable_input_require_grads()
-
     model.print_trainable_parameters()
 
-    # Argumentos de Treino (otimizados para Maxwell sm_52 sem watchdog timeout)
+    # Argumentos de Treino (gradient_checkpointing=False para evitar 'launch timed out' no watchdog da VCA)
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=args.epochs,
@@ -266,8 +267,7 @@ def main():
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         report_to="none",
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=False,
     )
 
     trainer = SFTTrainer(

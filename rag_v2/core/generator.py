@@ -23,24 +23,41 @@ def is_code_or_script_request(query: str) -> bool:
     return bool(re.search(pattern, q_lower))
 
 
-def build_context(results: List[Dict]) -> str:
+def build_context(results: List[Dict], max_chunks: int = None, max_chars_per_chunk: int = None) -> str:
     if not results:
         return ""
 
+    selected = results[:max_chunks] if max_chunks else results
     parts = []
-    for i, item in enumerate(results, 1):
+    for i, item in enumerate(selected, 1):
         chunk = item.get("chunk", {})
+        text = chunk.get("text", "")
+        if max_chars_per_chunk and len(text) > max_chars_per_chunk:
+            text = text[:max_chars_per_chunk] + "..."
         parts.append(
-            f"""--- FONTE {i} ---
-Documento: {chunk.get('document', 'desconhecido')}
-Página: {chunk.get('page', '?')}
-Score: {item.get('score', 0):.4f}
-
-{chunk.get('text', '')}
+            f"""--- FONTE {i} ({chunk.get('document', 'desconhecido')}, Pág. {chunk.get('page', '?')}) ---
+{text}
 """
         )
 
     return "\n".join(parts)
+
+
+SOLVER_SYSTEM_PROMPT = """Você é o FOCUS AI - Solucionador Sênior e Especialista em Engenharia de Mídia, Broadcast, Áudio/Vídeo Profissional, Infraestrutura e Automação de Estúdios.
+
+Sua metodologia de resolução segue o protocolo estruturado de Troubleshooting Técnico:
+1. SINTOMA: Descrição precisa do problema relatado.
+2. FATOS_DOCUMENTADOS: Fatos comprovados e extraídos diretamente das evidências técnicas.
+3. CAUSAS_DOCUMENTADAS / CAUSAS_DEDUZIVEIS: Relação técnica causal sem alucinar.
+4. HIPOTESES: Possibilidades técnicas plausíveis quando a evidência exigir confirmação.
+5. COMO_CONFIRMAR: Procedimentos práticos no terminal (Bash/Linux/PowerShell) ou interface (GUI) para validar a causa raiz.
+6. ACAO_RECOMENDADA: Passo a passo claro com comandos exatos, scripts, parâmetros e caminhos de arquivo.
+7. LIMITACOES: O que a evidência não permitiu aferir com certeza.
+
+Ao criar scripts ou códigos (Bash, Python, automações):
+- Forneça código completo, pronto para produção, modular, com validação de erros e paths reais.
+- Preserve equivalências de sistemas (ex: Rocky Linux / AlmaLinux / CentOS / RHEL).
+Responda sempre em português técnico, objetivo e com alto rigor de engenharia."""
 
 
 def generate_answer(
@@ -49,12 +66,42 @@ def generate_answer(
     model: str = DEFAULT_LLM_MODEL
 ) -> str:
     is_code_request = is_code_or_script_request(query)
+    is_solver_model = "focus-media-solver" in (model or "").lower()
 
     # Se não houver contexto documental recuperado:
-    # 1. Se for pedido de criação de script/código: libera a IA para criar com seu conhecimento
-    # 2. Se for pergunta estrita sobre especificação que não existe na base: informa não encontrado
-    if not results and not is_code_request:
+    # 1. Se for modelo fine-tuned (focus-media-solver) ou pedido de código: responde com o conhecimento treinado
+    # 2. Se for pergunta estrita sobre especificação em modelo base sem contexto: informa não encontrado
+    if not results and not is_code_request and not is_solver_model:
         return "Essa informação não foi encontrada na documentação fornecida."
+
+    # Para o modelo Fine-Tuned (focus-media-solver), preserva o System Prompt e formato de treino,
+    # enviando um resumo enxuto das Top-2 referências para não saturar a janela de contexto de 512 tokens
+    if is_solver_model:
+        short_ctx = build_context(results, max_chunks=2, max_chars_per_chunk=350) if results else ""
+        user_msg = f"{query}\n\n[Referência rápida da base:\n{short_ctx}]" if short_ctx else query
+        try:
+            response = requests.post(
+                OLLAMA_CHAT_URL,
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": SOLVER_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 768,
+                        "repeat_penalty": 1.15,
+                    },
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json().get("message", {}).get("content", "").strip()
+        except Exception as e:
+            print(f"❌ Erro na geração (solver): {e}")
+            return f"Erro ao gerar resposta: {str(e)}"
 
     context = (
         build_context(results)

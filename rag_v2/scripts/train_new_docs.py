@@ -134,8 +134,20 @@ def main():
     print(f"   Exemplos agora  : {after_count} (+{added_examples} novos)")
     print("-" * 80)
 
+    # -------------------------------------------------------------------------
+    # PASSO 5.1b: Sincroniza casos de TSHOOT e resoluções no Qdrant V2 (Híbrido)
+    # -------------------------------------------------------------------------
+    populate_v2_script = PROJECT_V2_ROOT / "scripts" / "populate_v2.py"
+    if populate_v2_script.exists():
+        run_step(
+            [sys.executable, str(populate_v2_script)],
+            "Passo 5.1b: Indexando resoluções e casos TSHOOT_KB no Qdrant V2 (RAG Híbrido)"
+        )
+
+    after_hash = file_sha256(DATASET_FILE)
+
     if args.dataset_only:
-        print("\n✅ Modo --dataset-only concluído! O dataset está atualizado.")
+        print("\n✅ Modo --dataset-only concluído! O dataset e o Qdrant V2 estão atualizados.")
         return
 
     # Verifica se o dataset mudou em relação ao último treinamento LoRA realizado

@@ -2,9 +2,11 @@
 """
 Popula a coleção rag_documents_v2 com embeddings gerados pelo nomic-embed-text.
 
-Lê os chunks.json (textos já extraídos dos PDFs pela V1), gera NOVOS
-embeddings usando o modelo nomic-embed-text com prefixo "search_document:",
-e insere na coleção rag_documents_v2 do Qdrant.
+Integra automaticamente 3 fontes de conhecimento no Qdrant V2:
+  1. chunks.json (textos e descrições Vision extraídos dos PDFs pela V1)
+  2. Documentos e Resoluções de TSHOOT locais (.md, .txt, .pdf em data/documents e /opt/ai/rag/documents)
+  3. Base de Casos Estruturados de Troubleshooting (media_solver_train.jsonl), já sanitizada
+     de dicionário para Markdown limpo!
 
 Uso:
     python3 scripts/populate_v2.py
@@ -13,6 +15,7 @@ Uso:
 
 import sys
 import os
+import ast
 import json
 import time
 import hashlib
@@ -20,7 +23,8 @@ import argparse
 from pathlib import Path
 
 # Adiciona o path da V2
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+PROJECT_V2_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_V2_ROOT))
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -31,12 +35,14 @@ from core.config import (
     DATA_ROOT, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE
 )
 from core.embeddings import get_embeddings_batch
+from core.generator import format_solver_output_to_markdown
 
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
 
 CHUNKS_FILE = os.path.join(DATA_ROOT, "database", "chunks.json")
+DATASET_JSONL_FILE = PROJECT_V2_ROOT / "fine_tuning" / "dataset" / "media_solver_train.jsonl"
 
 
 def generate_qdrant_id(chunk_id: str) -> int:
@@ -74,19 +80,164 @@ def create_collection(client: QdrantClient, recreate: bool = False):
     print(f"   ✅ Coleção criada com sucesso!")
 
 
+def load_local_resolution_files(known_docs: set) -> list:
+    """
+    Escaneia diretórios de documentos por arquivos .md e .txt (ex: guias de TSHOOT e resoluções)
+    para que entrem automaticamente no Qdrant V2 sem precisar serem PDFs.
+    """
+    extra_chunks = []
+    candidate_dirs = [
+        PROJECT_V2_ROOT / "data" / "documents",
+        Path(DATA_ROOT) / "documents",
+        Path("/opt/ai/rag/documents"),
+    ]
+    visited_dirs = set()
+
+    for d in candidate_dirs:
+        if not d.exists():
+            continue
+        real_d = str(d.resolve())
+        if real_d in visited_dirs:
+            continue
+        visited_dirs.add(real_d)
+
+        for fp in sorted(d.glob("**/*")):
+            if not fp.is_file():
+                continue
+            ext = fp.suffix.lower()
+            if ext not in (".md", ".txt"):
+                continue
+            if fp.name in known_docs:
+                continue
+
+            try:
+                content = fp.read_text(encoding="utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+
+            if len(content) < 80:
+                continue
+
+            file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            blocks = [content[i:i + 1800] for i in range(0, len(content), 1800)]
+            for b_idx, block in enumerate(blocks, start=1):
+                if len(block.strip()) < 50:
+                    continue
+                cid = hashlib.sha256(f"local_doc|{fp.name}|{b_idx}|{block}".encode("utf-8")).hexdigest()
+                extra_chunks.append({
+                    "chunk_id": cid,
+                    "document": fp.name,
+                    "file_hash": file_hash,
+                    "page": b_idx,
+                    "chunk": b_idx,
+                    "text": block.strip(),
+                })
+    return extra_chunks
+
+
+def sanitize_and_load_tshoot_dataset() -> list:
+    """
+    Lê media_solver_train.jsonl, converte respostas que estavam como dict Python ('SINTOMA': ...)
+    para Markdown técnico limpo (atualizando o próprio .jsonl se necessário) e retorna cada caso
+    de estudo como um chunk estruturado para indexação direta no Qdrant V2.
+    """
+    if not DATASET_JSONL_FILE.exists():
+        return []
+
+    tshoot_chunks = []
+    updated_lines = []
+    cleaned_count = 0
+
+    try:
+        raw_lines = DATASET_JSONL_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        print(f"⚠️ Não foi possível ler {DATASET_JSONL_FILE}: {e}")
+        return []
+
+    for idx, line in enumerate(raw_lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            msgs = obj.get("messages", [])
+            user_q = ""
+            assistant_a = ""
+            new_msgs = []
+            for m in msgs:
+                role = m.get("role", "")
+                content = str(m.get("content", "")).strip()
+                if role == "user":
+                    user_q = content
+                elif role == "assistant":
+                    if content.startswith("{"):
+                        clean_md = format_solver_output_to_markdown(content)
+                        if clean_md != content:
+                            content = clean_md
+                            cleaned_count += 1
+                    assistant_a = content
+                new_msgs.append({"role": role, "content": content})
+
+            updated_lines.append(json.dumps({"messages": new_msgs}, ensure_ascii=False))
+
+            if user_q and assistant_a:
+                combined_text = (
+                    f"CASO DE TROUBLESHOOTING / RESOLUÇÃO TÉCNICA:\n"
+                    f"PERGUNTA / INCIDENTE: {user_q}\n\n"
+                    f"{assistant_a}"
+                )
+                cid = hashlib.sha256(f"tshoot_kb|{user_q}".encode("utf-8")).hexdigest()
+                tshoot_chunks.append({
+                    "chunk_id": cid,
+                    "document": "TSHOOT_KB (Base de Resoluções)",
+                    "file_hash": cid[:16],
+                    "page": idx,
+                    "chunk": 1,
+                    "text": combined_text,
+                })
+        except Exception:
+            updated_lines.append(line)
+
+    if cleaned_count > 0:
+        try:
+            DATASET_JSONL_FILE.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+            print(f"   🧹 {cleaned_count} casos em {DATASET_JSONL_FILE.name} convertidos de dict '{{...}}' para Markdown limpo!")
+        except Exception:
+            pass
+
+    return tshoot_chunks
+
+
 def load_chunks() -> list:
-    """Carrega chunks.json (textos extraídos dos PDFs pela V1)."""
-    print(f"\n📂 Carregando chunks de: {CHUNKS_FILE}")
+    """Carrega chunks.json + arquivos .md/.txt de TSHOOT + casos estruturados do dataset."""
+    chunks = []
+    known_docs = set()
 
-    if not os.path.exists(CHUNKS_FILE):
-        print(f"❌ Arquivo não encontrado: {CHUNKS_FILE}")
-        print(f"   Verifique se DATA_ROOT está correto: {DATA_ROOT}")
-        sys.exit(1)
+    print(f"\n📂 [1/3] Carregando chunks de: {CHUNKS_FILE}")
+    if os.path.exists(CHUNKS_FILE):
+        with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
+            pdf_chunks = json.load(f)
+        chunks.extend(pdf_chunks)
+        for c in pdf_chunks:
+            if c.get("document"):
+                known_docs.add(c["document"])
+        print(f"   ✅ {len(pdf_chunks)} chunks carregados de chunks.json")
+    else:
+        print(f"   ⚠️ Arquivo chunks.json não encontrado em {CHUNKS_FILE}")
 
-    with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
+    print(f"📂 [2/3] Verificando guias e resoluções locais (.md / .txt)...")
+    local_md_chunks = load_local_resolution_files(known_docs)
+    if local_md_chunks:
+        chunks.extend(local_md_chunks)
+        print(f"   ✅ +{len(local_md_chunks)} chunks de guias .md/.txt adicionados")
+    else:
+        print("   ℹ️ Nenhum arquivo .md/.txt adicional fora do chunks.json")
 
-    print(f"   ✅ {len(chunks)} chunks carregados")
+    print(f"📂 [3/3] Carregando Base de Resoluções Estruturadas ({DATASET_JSONL_FILE.name})...")
+    tshoot_chunks = sanitize_and_load_tshoot_dataset()
+    if tshoot_chunks:
+        chunks.extend(tshoot_chunks)
+        print(f"   ✅ +{len(tshoot_chunks)} casos de Troubleshooting adicionados ao índice vetorial!")
 
     # Mostra resumo por documento
     docs = {}
@@ -94,7 +245,7 @@ def load_chunks() -> list:
         doc = c.get("document", "desconhecido")
         docs[doc] = docs.get(doc, 0) + 1
 
-    print(f"   📄 {len(docs)} documentos:")
+    print(f"\n   📄 Total consolidado: {len(chunks)} chunks em {len(docs)} fontes:")
     for doc, count in sorted(docs.items()):
         print(f"      • {doc}: {count} chunks")
 
@@ -135,10 +286,9 @@ def populate(client: QdrantClient, chunks: list, incremental: bool = True):
                 if generate_qdrant_id(c.get("chunk_id", "")) not in existing_ids
             ]
             if not chunks_to_process:
-                print("✨ Todos os chunks de chunks.json já estão indexados no Qdrant v2!")
-                print("   Nenhum novo documento para processar.")
+                print("✨ Todos os chunks (manuais + TSHOOT_KB) já estão indexados no Qdrant v2!")
                 return 0, 0, 0
-            print(f"🆕 {len(chunks_to_process)} chunks novos a serem indexados.")
+            print(f"🆕 {len(chunks_to_process)} chunks novos (manuais/resoluções) a serem indexados.")
             chunks = chunks_to_process
 
     total = len(chunks)
@@ -159,14 +309,11 @@ def populate(client: QdrantClient, chunks: list, incremental: bool = True):
         batch_end = min(batch_start + batch_size, total)
         batch_chunks = chunks[batch_start:batch_end]
 
-        # Extrai textos para embedding
         texts = [c.get("text", "") for c in batch_chunks]
 
         try:
-            # Gera embeddings com prefixo search_document:
             embeddings = get_embeddings_batch(texts, task_type="document")
 
-            # Monta os pontos para o Qdrant
             points = []
             for chunk, embedding in zip(batch_chunks, embeddings):
                 chunk_id = chunk.get("chunk_id", "")
@@ -189,7 +336,6 @@ def populate(client: QdrantClient, chunks: list, incremental: bool = True):
                     )
                 )
 
-            # Insere no Qdrant
             if points:
                 client.upsert(
                     collection_name=QDRANT_COLLECTION,
@@ -198,7 +344,6 @@ def populate(client: QdrantClient, chunks: list, incremental: bool = True):
                 )
                 inserted += len(points)
 
-            # Progresso
             elapsed = time.time() - start_time
             rate = inserted / elapsed if elapsed > 0 else 0
             eta = (total - batch_end) / rate if rate > 0 else 0
@@ -220,7 +365,7 @@ def populate(client: QdrantClient, chunks: list, incremental: bool = True):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Popula rag_documents_v2 com embeddings nomic-embed-text"
+        description="Popula rag_documents_v2 com embeddings nomic-embed-text (Manuais + TSHOOT_KB)"
     )
     parser.add_argument(
         "--recreate",
@@ -241,26 +386,19 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("📊 POPULANDO COLEÇÃO rag_documents_v2")
+    print("📊 POPULANDO COLEÇÃO rag_documents_v2 (MANUAIS + RESOLUÇÕES TSHOOT)")
     print(f"   Modelo: {EMBEDDING_MODEL}")
     print(f"   Coleção: {QDRANT_COLLECTION}")
     print(f"   Qdrant: {QDRANT_URL}")
     print("=" * 70)
 
-    # 1. Conecta ao Qdrant
     print("\n🔌 Conectando ao Qdrant...")
     client = QdrantClient(url=QDRANT_URL, timeout=300)
 
-    # 2. Cria/verifica coleção
     create_collection(client, recreate=args.recreate)
-
-    # 3. Carrega chunks
     chunks = load_chunks()
-
-    # 4. Popula
     inserted, errors, elapsed = populate(client, chunks, incremental=not args.recreate)
 
-    # 5. Resultado final
     info = client.get_collection(QDRANT_COLLECTION)
 
     print()
@@ -272,10 +410,7 @@ def main():
     print(f"   📦 Total na coleção: {info.points_count}")
     print("=" * 70)
 
-    # 6. Salva manifesto
-    data_dir = os.path.join(
-        str(Path(__file__).resolve().parent.parent), "data"
-    )
+    data_dir = os.path.join(str(PROJECT_V2_ROOT), "data")
     os.makedirs(data_dir, exist_ok=True)
 
     manifest = {
@@ -295,7 +430,6 @@ def main():
 
     print(f"\n📋 Manifesto salvo em: {manifest_path}")
 
-    # 7. Próximo passo: Treinamento Incremental (Etapa 5)
     train_script = Path(__file__).resolve().parent / "train_new_docs.py"
     if args.train:
         import subprocess

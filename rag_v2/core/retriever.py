@@ -75,16 +75,17 @@ CRITICAL_ENTITIES = {
     # Segurança & Antivírus
     "kaspersky", "kesl", "ksc", "antivirus", "antivírus", "clamav", "crowdstrike", "sentinelone",
     # Streaming & Acesso Remoto
-    "pcoip", "anyware", "anywhere", "teradici", "teamviewer", "anydesk", "parsec", "rdp", "vnc",
+    "pcoip", "anyware", "anywhere", "teradici", "teamviewer", "anydesk", "parsec", "rdp", "vnc", "4172",
     # Broadcast Áudio & IP
     "dante", "audinate", "rivage", "yamaha", "twinlane", "rio", "cl5", "ql5", "dm7",
     "aes67", "smpte", "st2110", "st2022", "ptp",
-    # Broadcast Vídeo, Edição & Pós-Produção
-    "flame", "autodesk", "maya", "3dsmax", "avid", "mediacentral", "mediacomposer",
-    "interplay", "nexis", "isis", "davinci", "resolve", "nuke", "premiere", "aftereffects",
+    # Broadcast Vídeo, Edição, Plugins & Pós-Produção
+    "flame", "autodesk", "sapphire", "boris", "borisfx", "ofx", "sparks", "wiretap", "stone", "dlmpd",
+    "lustre", "flare", "burn", "maya", "3dsmax", "avid", "mediacentral", "mediacomposer",
+    "interplay", "nexis", "isis", "diva", "davinci", "resolve", "nuke", "premiere", "aftereffects",
     # Armazenamento, Backup & Infraestrutura
     "bacula", "veeam", "networker", "commvault", "zabbix", "grafana", "prometheus",
-    "nginx", "apache", "haproxy", "postfix", "samba", "sssd", "nfs", "iscsi", "lvm",
+    "nginx", "apache", "haproxy", "postfix", "samba", "sssd", "nfs", "iscsi", "lvm", "rlm",
     # Pipeline IA & Web
     "qdrant", "ollama", "fastapi"
 }
@@ -181,9 +182,6 @@ def analyze_query_components(query: str) -> Dict:
         elif tl in CRITICAL_ENTITIES or tl in corpus_words:
             entities.append(t)
         else:
-            # Princípio Universal: Qualquer substantivo técnico que NÃO seja plataforma e NÃO seja ação
-            # é, por definição, um assunto/software/ferramenta específica!
-            # Ex: maya, nuke, sssd, lvm, bacula, zabbix, fortinet, davinci, etc.
             entities.append(t)
 
     clean_tokens = [t for t in tokens if t.lower() not in stopwords]
@@ -222,15 +220,12 @@ def generate_search_queries(query: str) -> List[str]:
 
     # 3. Query Focada no Assunto / Entidade (Universal Subject Focus)
     if comp["entities"]:
-        # Se temos uma ferramenta ou software específico (ex: Maya, Nuke, Kaspersky, SSSD, LVM):
-        # Montamos busca isolada: Entidade + Ações (sem a plataforma ampla que atrai livros gerais)
         entity_parts = comp["entities"] + comp["actions"]
         if comp["platforms"] and entity_parts:
             focused = " ".join(entity_parts)
             if focused.lower() not in [q.lower() for q in queries]:
                 queries.append(focused)
     elif comp["platforms"] and comp["actions"]:
-        # Quando a plataforma é o único sujeito (ex: 'particionar disco no Linux' ou 'firewall no Windows'):
         plat_focused = " ".join(comp["platforms"] + comp["actions"])
         if plat_focused.lower() not in [q.lower() for q in queries]:
             queries.append(plat_focused)
@@ -289,7 +284,7 @@ expand_query = generate_search_queries
 def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dict]:
     """
     Recupera contextos relevantes através de busca vetorial multi-representação (Multi-Query),
-    fusão RRF, desambiguação léxica com proteção de entidade e diversidade documental.
+    fusão RRF, Score Híbrido Ponderado (Semântico + Lexical + TSHOOT Boost) e diversidade documental.
     """
     top_k = top_k if top_k is not None else TOP_K
     threshold = threshold if threshold is not None else THRESHOLD
@@ -337,9 +332,6 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
 
     comp = analyze_query_components(query)
 
-    # Identifica entidades críticas alvo presentes na pergunta:
-    # 1. Se houver entidades de software/aplicação específicas (ex: Kaspersky, PCoIP), elas são prioritárias.
-    # 2. Se não houver entidade de aplicação mas houver plataforma (ex: Rocky Linux), a plataforma vira alvo.
     target_entities = [e.lower() for e in comp["entities"]]
     if not target_entities and comp["platforms"]:
         target_entities = [p.lower() for p in comp["platforms"]]
@@ -347,17 +339,35 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
     query_terms = [t.lower() for t in comp["clean_tokens"]]
 
     RRF_K = 60
+    num_query_terms = max(len(query_terms), 1)
     for item in all_candidates.values():
         item["rrf_score"] = sum(1.0 / (RRF_K + rank) for rank in item["rrf_ranks"])
         doc_str = (item.get("document") or "").lower()
         text_str = (item.get("text") or "").lower()
 
-        # Proteção e Prioridade Absoluta de Entidade Crítica:
-        # Se a pergunta citar 'Kaspersky' ou 'PCoIP', chunks que contêm essa entidade
-        # ganham prioridade absoluta sobre chunks puramente contextuais (ex: só 'Linux').
         item["entity_match"] = any(e in doc_str or e in text_str for e in target_entities) if target_entities else False
-        item["brand_match"] = item["entity_match"]  # Compatibilidade interna
+        item["brand_match"] = item["entity_match"]
         item["keyword_hits"] = sum(1 for term in query_terms if term in doc_str or term in text_str)
+        keyword_ratio = item["keyword_hits"] / num_query_terms
+
+        # Identifica se o chunk é uma Resolução/Guia de Troubleshooting estruturado (TSHOOT)
+        is_tshoot_doc = (
+            "tshoot" in doc_str
+            or "sintoma:" in text_str
+            or "acao_recomendada:" in text_str
+            or "como_confirmar:" in text_str
+        )
+        tshoot_boost = 0.14 if (is_tshoot_doc and item["best_score"] >= 0.42) else 0.0
+        entity_boost = 0.18 if item["entity_match"] else 0.0
+
+        # Score Híbrido Combinado (Semântico + RRF Multi-Query + Lexical + Resolução TSHOOT)
+        item["hybrid_score"] = (
+            item["best_score"]
+            + (item["rrf_score"] * 3.0)
+            + (keyword_ratio * 0.18)
+            + entity_boost
+            + tshoot_boost
+        )
 
     candidates = [c for c in all_candidates.values() if c["best_score"] >= threshold]
 
@@ -373,20 +383,14 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
         return []
 
     # ========================================================
-    # ORDENAÇÃO PRIORITÁRIA HÍBRIDA:
-    # 1. Chunks que contêm a entidade de aplicação específica (ex: Kaspersky, PCoIP)
-    # 2. Chunks com mais termos coincidentes da pergunta (keyword hits)
-    # 3. Score RRF (combinação ponderada das buscas original, canônica e focada)
-    # 4. Número de aparições nas buscas
-    # 5. Score bruto de similaridade
+    # ORDENAÇÃO HÍBRIDA PONDERADA:
+    # Combina proteção de entidade principal com o Score Híbrido contínuo
     # ========================================================
     candidates.sort(
         key=lambda x: (
             x.get("entity_match", False),
-            x["keyword_hits"] > 0,
-            x["keyword_hits"],
+            round(x.get("hybrid_score", 0.0), 4),
             x["rrf_score"],
-            x["appearances"],
             x["best_score"]
         ),
         reverse=True
@@ -394,21 +398,20 @@ def retrieve(query: str, top_k: int = None, threshold: float = None) -> List[Dic
 
     # ========================================================
     # DIVERSIDADE DOCUMENTAL
-    # Impede que livros enciclopédicos gerais (ex: Linux a Bíblia)
-    # ocupem mais de 2 slots, abrindo espaço para manuais específicos.
     # ========================================================
     selected = []
     doc_counts = {}
 
     for item in candidates:
         doc = item.get("document") or "desconhecido"
-        if doc_counts.get(doc, 0) < MAX_CHUNKS_PER_DOCUMENT:
+        # Permite até 3 casos da base de TSHOOT_KB se forem altamente relevantes, ou MAX_CHUNKS_PER_DOCUMENT para PDFs
+        limit_for_doc = 3 if doc.startswith("TSHOOT_KB") else MAX_CHUNKS_PER_DOCUMENT
+        if doc_counts.get(doc, 0) < limit_for_doc:
             selected.append(item)
             doc_counts[doc] = doc_counts.get(doc, 0) + 1
             if len(selected) >= FINAL_CONTEXTS:
                 break
 
-    # Completa até FINAL_CONTEXTS se sobrarem slots
     if len(selected) < FINAL_CONTEXTS:
         selected_ids = {s["id"] for s in selected}
         for item in candidates:

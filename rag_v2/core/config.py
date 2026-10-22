@@ -43,7 +43,7 @@ SUPPORTED_MODELS = [
     "gemma3:4b",
 ]
 
-DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemma3:12b")
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "focus-media-solver")
 QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "gemma3:4b")
 
 # ============================================================

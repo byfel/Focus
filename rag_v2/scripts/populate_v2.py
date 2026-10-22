@@ -208,12 +208,32 @@ def sanitize_and_load_tshoot_dataset() -> list:
     return tshoot_chunks
 
 
+def remove_synthetic_tshoot_kb(client: QdrantClient):
+    """Remove pontos sintéticos antigos 'TSHOOT_KB (Base de Resoluções)' que diluíam os manuais reais."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    try:
+        client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="document",
+                        match=MatchValue(value="TSHOOT_KB (Base de Resoluções)"),
+                    )
+                ]
+            ),
+            wait=True,
+        )
+    except Exception:
+        pass
+
+
 def load_chunks() -> list:
-    """Carrega chunks.json + arquivos .md/.txt de TSHOOT + casos estruturados do dataset."""
+    """Carrega chunks.json (PDFs reais) + arquivos .md/.txt reais de TSHOOT."""
     chunks = []
     known_docs = set()
 
-    print(f"\n📂 [1/3] Carregando chunks de: {CHUNKS_FILE}")
+    print(f"\n📂 [1/2] Carregando chunks de manuais oficiais: {CHUNKS_FILE}")
     if os.path.exists(CHUNKS_FILE):
         with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
             pdf_chunks = json.load(f)
@@ -225,7 +245,7 @@ def load_chunks() -> list:
     else:
         print(f"   ⚠️ Arquivo chunks.json não encontrado em {CHUNKS_FILE}")
 
-    print(f"📂 [2/3] Verificando guias e resoluções locais (.md / .txt)...")
+    print(f"📂 [2/2] Verificando guias e resoluções reais (.md / .txt)...")
     local_md_chunks = load_local_resolution_files(known_docs)
     if local_md_chunks:
         chunks.extend(local_md_chunks)
@@ -233,11 +253,8 @@ def load_chunks() -> list:
     else:
         print("   ℹ️ Nenhum arquivo .md/.txt adicional fora do chunks.json")
 
-    print(f"📂 [3/3] Carregando Base de Resoluções Estruturadas ({DATASET_JSONL_FILE.name})...")
-    tshoot_chunks = sanitize_and_load_tshoot_dataset()
-    if tshoot_chunks:
-        chunks.extend(tshoot_chunks)
-        print(f"   ✅ +{len(tshoot_chunks)} casos de Troubleshooting adicionados ao índice vetorial!")
+    # Higieniza o .jsonl para treinos futuros sem injetar resumos sintéticos no Qdrant
+    sanitize_and_load_tshoot_dataset()
 
     # Mostra resumo por documento
     docs = {}
@@ -245,7 +262,7 @@ def load_chunks() -> list:
         doc = c.get("document", "desconhecido")
         docs[doc] = docs.get(doc, 0) + 1
 
-    print(f"\n   📄 Total consolidado: {len(chunks)} chunks em {len(docs)} fontes:")
+    print(f"\n   📄 Total consolidado: {len(chunks)} chunks em {len(docs)} documentos oficiais:")
     for doc, count in sorted(docs.items()):
         print(f"      • {doc}: {count} chunks")
 
@@ -396,6 +413,7 @@ def main():
     client = QdrantClient(url=QDRANT_URL, timeout=300)
 
     create_collection(client, recreate=args.recreate)
+    remove_synthetic_tshoot_kb(client)
     chunks = load_chunks()
     inserted, errors, elapsed = populate(client, chunks, incremental=not args.recreate)
 

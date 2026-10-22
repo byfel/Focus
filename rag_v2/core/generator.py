@@ -45,21 +45,30 @@ def build_context(results: List[Dict], max_chunks: int = None, max_chars_per_chu
     return "\n".join(parts)
 
 
-SOLVER_SYSTEM_PROMPT = """Você é o FOCUS AI - Solucionador Sênior e Especialista em Engenharia de Mídia, Broadcast, Áudio/Vídeo Profissional, Infraestrutura e Automação de Estúdios.
+SOLVER_SYSTEM_PROMPT = """Você é o FOCUS AI - Solucionador Sênior e Especialista em Engenharia de Mídia, Broadcast, VFX, Áudio/Vídeo Profissional, Infraestrutura e Automação.
 
-Sua metodologia de resolução segue o protocolo estruturado de Troubleshooting Técnico:
-1. SINTOMA: Descrição precisa do problema relatado.
-2. FATOS_DOCUMENTADOS: Fatos comprovados e extraídos diretamente das evidências técnicas.
-3. CAUSAS_DOCUMENTADAS / CAUSAS_DEDUZIVEIS: Relação técnica causal sem alucinar.
-4. HIPOTESES: Possibilidades técnicas plausíveis quando a evidência exigir confirmação.
-5. COMO_CONFIRMAR: Procedimentos práticos no terminal (Bash/Linux/PowerShell) ou interface (GUI) para validar a causa raiz.
-6. ACAO_RECOMENDADA: Passo a passo claro com comandos exatos, scripts, parâmetros e caminhos de arquivo.
-7. LIMITACOES: O que a evidência não permitiu aferir com certeza.
+REGRA DE OURO DE QUALIDADE E PROFUNDIDADE TÉCNICA:
+Sua resposta deve ser TÃO COMPLETA, DETALHADA E PRECISA quanto um guia de engenharia sênior, combinando todas as Fontes relevantes do CONTEXTO sem omitir nenhum detalhe técnico.
 
-Ao criar scripts ou códigos (Bash, Python, automações):
-- Forneça código completo, pronto para produção, modular, com validação de erros e paths reais.
-- Preserve equivalências de sistemas (ex: Rocky Linux / AlmaLinux / CentOS / RHEL).
-Responda sempre em português técnico, objetivo e com alto rigor de engenharia."""
+Siga rigorosamente estas diretrizes:
+1. FIDELIDADE ABSOLUTA E RIQUEZA DE DETALHES (NÃO RESUMA DEMAIS):
+   - Extraia e preserve EXATAMENTE todos os caminhos de diretórios (ex: `C:\\Users\\<usuario>\\...`, `/opt/...`, `/usr/OFX/...`), números de versão exatos (ex: `<= 0.87.0`, `<= 0.74.0`), nomes de scripts (ex: `corrigir_nodes.bat`, `corrigir_nodes.py`), portas de rede, variáveis e menus da interface (ex: `Settings > Libraries`, `Engine > Restart`).
+   - Se o contexto apresentar mais de uma opção de solução (ex: Opção A via Script Automatizado e Opção B Manual), documente AMBAS de forma completa e passo a passo.
+   - Cite as fontes utilizadas (ex: Conforme Fonte 1, Fonte 2) para dar rastreabilidade.
+   - NUNCA misture assuntos de softwares diferentes que não tenham relação com a pergunta do usuário.
+
+2. ESTRUTURA CLARA DE TROUBLESHOOTING E RESOLUÇÃO:
+   Organize sua resposta em Markdown limpo e bem formatado contendo:
+   - **Problema / Sintoma Identificado:** Descrição clara do erro ou cenário (incluindo mensagens de erro exatas na tela/log).
+   - **Causa Raiz Documentada:** Por que o problema ocorre segundo a documentação.
+   - **Solução Passo a Passo Detalhada:** Todos os passos numerados com caminhos completos, versões exatas, opções (A/B) e comandos.
+   - **Explicação de Scripts / Automações (se houver):** O que cada script (`.bat`, `.py`, `.sh`) faz nos bastidores.
+   - **Como Confirmar / Considerações Adicionais:** Checklist de validação final, backups necessários e cuidados com versões.
+
+3. CRIAÇÃO DE SCRIPTS E CÓDIGOS:
+   - Quando solicitado um script ou automação, forneça o código completo, pronto para produção e comentado em blocos Markdown (```bash, ```python, ```powershell, ```bat).
+
+Responda sempre em português técnico, claro, completo e pronto para uso em produção."""
 
 
 def format_solver_output_to_markdown(raw_text: str) -> str:
@@ -126,15 +135,17 @@ def generate_answer(
     if not results and not is_code_request and not is_solver_model:
         return "Essa informação não foi encontrada na documentação fornecida."
 
-    # Para o modelo Fine-Tuned (focus-media-solver), preserva o System Prompt e formato de treino,
-    # enviando as Top-5 referências do Qdrant com janela de 4096 tokens no Ollama
+    # Para o modelo Solucionador (focus-media-solver), envia o contexto completo das fontes
+    # e usa o SOLVER_SYSTEM_PROMPT detalhado para garantir profundidade técnica igual/superior ao Gemma
     if is_solver_model:
-        short_ctx = build_context(results, max_chunks=5, max_chars_per_chunk=900) if results else ""
-        user_msg = (
-            f"Baseando-se estritamente nas evidências técnicas abaixo da documentação oficial:\n\n"
-            f"{short_ctx}\n"
-            f"Pergunta/Incidente: {query}"
-        ) if short_ctx else query
+        full_ctx = build_context(results) if results else "Nenhum manual específico encontrado na base local."
+        user_msg = f"""CONTEXTO DA BASE TÉCNICA:
+
+{full_ctx}
+
+SOLICITAÇÃO DO USUÁRIO: {query}
+
+Elabore um guia técnico completo e detalhado combinando todas as informações relevantes das fontes acima (preservando todos os caminhos, versões exatas, scripts e passos):"""
         try:
             response = requests.post(
                 OLLAMA_CHAT_URL,
@@ -147,12 +158,12 @@ def generate_answer(
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
-                        "num_ctx": 4096,
-                        "num_predict": 768,
-                        "repeat_penalty": 1.15,
+                        "num_ctx": 8192,
+                        "num_predict": 2048,
+                        "repeat_penalty": 1.12,
                     },
                 },
-                timeout=120,
+                timeout=300,
             )
             response.raise_for_status()
             raw_ans = response.json().get("message", {}).get("content", "").strip()

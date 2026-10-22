@@ -20,7 +20,21 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("export_ollama")
 
-MODELFILE_TEMPLATE = """# FOCUS AI - Solucionador de Mídia & Broadcast
+MODELFILE_SYSTEM_PROMPT = """Você é o FOCUS AI (focus-media-solver) — Engenheiro Sênior de Mídia, Broadcast, VFX e Troubleshooting Técnico.
+
+REGRAS DE OURO PARA RESOLUÇÃO TÉCNICA:
+1. FIDELIDADE E RIQUEZA DE DETALHES: Extraia TODOS os detalhes técnicos das Fontes fornecidas: caminhos completos de diretórios (Windows/Linux), números exatos de versão (ex: <= 0.87.0, <= 0.74.0), nomes de scripts (.bat, .py, .sh), arquivos de configuração (.json, .conf), portas de rede e menus de interface.
+2. COMBINE AS FONTES RELEVANTES: Se múltiplas fontes abordam o mesmo problema (ex: Opção A com script automatizado e Opção B manual), apresente o guia completo combinando ambas as opções e cite de qual Fonte veio cada passo (ex: Conforme Fonte 1, Fonte 2).
+3. ISOLAMENTO DE ESCOPO (ANTI-CONTAMINAÇÃO): Ignore completamente qualquer trecho de fonte que fale de outro software ou equipamento diferente do perguntado pelo usuário. Nunca misture procedimentos de ferramentas distintas.
+4. ESTRUTURA CLARA E COMPLETA EM MARKDOWN:
+   - **Problema / Sintoma Identificado**: Resumo claro do erro e comportamento.
+   - **Fatos e Requisitos Técnicos**: Versões exatas exigidas, caminhos de pastas e arquivos envolvidos.
+   - **Solução Passo a Passo Detalhada**: Guia numerado completo (incluindo Opção Manual e Opção Automatizada/Script, se houver nas fontes).
+   - **Explicação de Scripts / Comandos (se aplicável)**: Detalhe o que cada script ou comando executa nos bastidores.
+   - **Como Confirmar / Validar**: Como testar se o problema foi resolvido.
+5. NUNCA resuma em dicionários Python curtos e nunca omita passos importantes das fontes."""
+
+MODELFILE_TEMPLATE_HF = """# FOCUS AI - Solucionador de Mídia & Broadcast (HF/LoRA Merge)
 FROM {model_source}
 
 TEMPLATE \"\"\"{{{{ if .System }}}}<|im_start|>system
@@ -30,26 +44,25 @@ TEMPLATE \"\"\"{{{{ if .System }}}}<|im_start|>system
 <|im_start|>assistant
 {{{{ end }}}}{{{{ .Response }}}}<|im_end|>\"\"\"
 
-SYSTEM \"\"\"Você é o FOCUS AI - Solucionador Sênior e Especialista em Engenharia de Mídia, Broadcast, Áudio/Vídeo Profissional, Infraestrutura e Automação de Estúdios.
-
-Sua metodologia de resolução segue o protocolo estruturado de Troubleshooting Técnico:
-1. SINTOMA: Descrição precisa do problema relatado.
-2. FATOS_DOCUMENTADOS: Fatos comprovados e extraídos diretamente das evidências técnicas.
-3. CAUSAS_DOCUMENTADAS / CAUSAS_DEDUZIVEIS: Relação técnica causal sem alucinar.
-4. HIPOTESES: Possibilidades técnicas plausíveis quando a evidência exigir confirmação.
-5. COMO_CONFIRMAR: Procedimentos práticos no terminal (Bash/Linux/PowerShell) ou interface (GUI) para validar a causa raiz.
-6. ACAO_RECOMENDADA: Passo a passo claro com comandos exatos, scripts, parâmetros e caminhos de arquivo.
-7. LIMITACOES: O que a evidência não permitiu aferir com certeza.
-
-Ao criar scripts ou códigos (Bash, Python, automações):
-- Forneça código completo, pronto para produção, modular, com validação de erros e paths reais.
-- Preserve equivalências de sistemas (ex: Rocky Linux / AlmaLinux / CentOS / RHEL).
-Responda sempre em português técnico, objetivo e com alto rigor de engenharia.\"\"\"
+SYSTEM \"\"\"{system_prompt}\"\"\"
 
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9
+PARAMETER num_ctx 8192
+PARAMETER num_predict 2048
 PARAMETER stop "<|im_end|>"
 PARAMETER stop "<|endoftext|>"
+"""
+
+MODELFILE_TEMPLATE_OLLAMA_BASE = """# FOCUS AI - Solucionador de Mídia & Broadcast (Base Ollama Especializada)
+FROM {model_source}
+
+SYSTEM \"\"\"{system_prompt}\"\"\"
+
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER num_ctx 8192
+PARAMETER num_predict 2048
 """
 
 
@@ -84,9 +97,10 @@ def merge_lora_weights(base_model_name: str, adapter_dir: Path, output_merged_di
     logger.info("✅ Fusão concluída com sucesso!")
 
 
-def create_modelfile(model_source_path: str, modelfile_path: Path):
+def create_modelfile(model_source_path: str, modelfile_path: Path, is_ollama_base: bool = False):
     """Gera o arquivo Modelfile para o Ollama."""
-    content = MODELFILE_TEMPLATE.format(model_source=model_source_path)
+    template = MODELFILE_TEMPLATE_OLLAMA_BASE if is_ollama_base else MODELFILE_TEMPLATE_HF
+    content = template.format(model_source=model_source_path, system_prompt=MODELFILE_SYSTEM_PROMPT)
     modelfile_path.write_text(content, encoding="utf-8")
     logger.info(f"📄 Modelfile gerado em: {modelfile_path}")
 
@@ -110,6 +124,8 @@ def main():
     parser = argparse.ArgumentParser(description="FOCUS AI - Merge e Deploy no Ollama")
     parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
                         help="Nome do modelo base no HuggingFace")
+    parser.add_argument("--ollama-base", type=str, default=None,
+                        help="Usar modelo base nativo do Ollama (ex: gemma3:12b ou gemma3:4b) sem compressão 1.5B")
     parser.add_argument("--adapter-dir", type=str, default=None,
                         help="Diretório onde estão os pesos LoRA (padrão: output/lora_adapter)")
     parser.add_argument("--merged-dir", type=str, default=None,
@@ -127,6 +143,12 @@ def main():
     merged_dir = Path(args.merged_dir) if args.merged_dir else root_ft / "output" / "merged_model"
     modelfile_path = root_ft / "Modelfile"
 
+    if args.ollama_base:
+        logger.info(f"Construindo '{args.model_name}' sobre base Ollama de alta capacidade: {args.ollama_base}")
+        create_modelfile(args.ollama_base, modelfile_path, is_ollama_base=True)
+        register_in_ollama(args.model_name, modelfile_path)
+        return
+
     if not args.skip_merge and not args.gguf_path:
         if not adapter_dir.exists():
             logger.error(f"Adaptador LoRA não encontrado em: {adapter_dir}")
@@ -137,7 +159,7 @@ def main():
     # Fonte para o Modelfile
     model_source = args.gguf_path if args.gguf_path else str(merged_dir)
 
-    create_modelfile(model_source, modelfile_path)
+    create_modelfile(model_source, modelfile_path, is_ollama_base=False)
     register_in_ollama(args.model_name, modelfile_path)
 
 

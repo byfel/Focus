@@ -785,13 +785,28 @@ def generate_cases_from_text(
         return []
 
 
-def format_to_chatml(system_prompt: str, user_query: str, assistant_response: str) -> Dict:
+def _normalize_response_text(val) -> str:
+    if isinstance(val, dict):
+        parts = []
+        for k, v in val.items():
+            if isinstance(v, list):
+                v_str = "\n".join(f"- {item}" for item in v)
+            else:
+                v_str = str(v)
+            parts.append(f"{k}:\n{v_str}")
+        return "\n\n".join(parts).strip()
+    elif isinstance(val, list):
+        return "\n".join(str(x) for x in val).strip()
+    return str(val or "").strip()
+
+
+def format_to_chatml(system_prompt: str, user_query: str, assistant_response) -> Dict:
     """Formata o exemplo no padrão ChatML (padrão ouro para SFTTrainer / Hugging Face)."""
     return {
         "messages": [
             {"role": "system", "content": str(system_prompt).strip()},
             {"role": "user", "content": str(user_query).strip()},
-            {"role": "assistant", "content": str(assistant_response).strip()}
+            {"role": "assistant", "content": _normalize_response_text(assistant_response)}
         ]
     }
 
@@ -1011,7 +1026,7 @@ def main():
             chunk_samples = []
             for c in cases:
                 u_query = str(c.get("user_query", "")).strip()
-                a_resp = str(c.get("assistant_response", "")).strip()
+                a_resp = _normalize_response_text(c.get("assistant_response", ""))
                 if u_query and a_resp and u_query not in seen_queries:
                     chatml_sample = format_to_chatml(
                         system_prompt=SYSTEM_PROMPT,

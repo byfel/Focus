@@ -31,6 +31,7 @@ if str(PROJECT_V2_ROOT) not in sys.path:
 
 from core.config import OLLAMA_CHAT_URL
 from core.pipeline import ask as ask_rag_v2
+from core.generator import format_solver_output_to_markdown
 
 # ==============================================================================
 # CASOS DE TESTE COM GABARITO TÉCNICO (GROUND-TRUTH FACTS)
@@ -169,7 +170,8 @@ def ask_finetuned_direct(question: str, model_name: str) -> Dict:
         timeout=180,
     )
     resp.raise_for_status()
-    answer = resp.json().get("message", {}).get("content", "").strip()
+    raw_ans = resp.json().get("message", {}).get("content", "").strip()
+    answer = format_solver_output_to_markdown(raw_ans)
     return {"answer": answer, "sources": []}
 
 

@@ -1,4 +1,6 @@
 import re
+import ast
+import json
 import requests
 from typing import List, Dict
 from .config import OLLAMA_CHAT_URL, DEFAULT_LLM_MODEL
@@ -60,6 +62,56 @@ Ao criar scripts ou códigos (Bash, Python, automações):
 Responda sempre em português técnico, objetivo e com alto rigor de engenharia."""
 
 
+def format_solver_output_to_markdown(raw_text: str) -> str:
+    """
+    Se o modelo fine-tuned retornar um dicionário Python/JSON serializado
+    (ex: {'SINTOMA': '...', 'FATOS_DOCUMENTADOS': [...]}), converte automaticamente
+    para Markdown limpo e formatado para exibição na interface Web.
+    """
+    text = (raw_text or "").strip()
+    if not text.startswith("{"):
+        return text
+
+    # Pega apenas o primeiro bloco de dicionário caso o modelo tenha repetido um segundo bloco
+    first_dict_str = text.split("\n\n{")[0].strip()
+    parsed = None
+    for candidate in (first_dict_str, text):
+        try:
+            parsed = json.loads(candidate)
+            break
+        except Exception:
+            try:
+                parsed = ast.literal_eval(candidate)
+                break
+            except Exception:
+                continue
+
+    if not isinstance(parsed, dict):
+        return text
+
+    md_parts = []
+    for key, val in parsed.items():
+        if val is None or val == [] or val == "":
+            continue
+        md_parts.append(f"### {key}")
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    for sub_k, sub_v in item.items():
+                        lang = sub_k.lower() if sub_k.lower() in ("bash", "python", "sh", "powershell") else "bash"
+                        md_parts.append(f"**{sub_k}:**\n```{lang}\n{sub_v}\n```")
+                else:
+                    md_parts.append(f"- {item}")
+        elif isinstance(val, dict):
+            for sub_k, sub_v in val.items():
+                md_parts.append(f"- **{sub_k}:** {sub_v}")
+        else:
+            md_parts.append(str(val))
+        md_parts.append("")
+
+    return "\n".join(md_parts).strip()
+
+
 def generate_answer(
     query: str,
     results: List[Dict],
@@ -75,10 +127,14 @@ def generate_answer(
         return "Essa informação não foi encontrada na documentação fornecida."
 
     # Para o modelo Fine-Tuned (focus-media-solver), preserva o System Prompt e formato de treino,
-    # enviando um resumo enxuto das Top-2 referências para não saturar a janela de contexto de 512 tokens
+    # enviando as Top-5 referências do Qdrant com janela de 4096 tokens no Ollama
     if is_solver_model:
-        short_ctx = build_context(results, max_chunks=2, max_chars_per_chunk=350) if results else ""
-        user_msg = f"{query}\n\n[Referência rápida da base:\n{short_ctx}]" if short_ctx else query
+        short_ctx = build_context(results, max_chunks=5, max_chars_per_chunk=900) if results else ""
+        user_msg = (
+            f"Baseando-se estritamente nas evidências técnicas abaixo da documentação oficial:\n\n"
+            f"{short_ctx}\n"
+            f"Pergunta/Incidente: {query}"
+        ) if short_ctx else query
         try:
             response = requests.post(
                 OLLAMA_CHAT_URL,
@@ -91,6 +147,7 @@ def generate_answer(
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
+                        "num_ctx": 4096,
                         "num_predict": 768,
                         "repeat_penalty": 1.15,
                     },
@@ -98,7 +155,8 @@ def generate_answer(
                 timeout=120,
             )
             response.raise_for_status()
-            return response.json().get("message", {}).get("content", "").strip()
+            raw_ans = response.json().get("message", {}).get("content", "").strip()
+            return format_solver_output_to_markdown(raw_ans)
         except Exception as e:
             print(f"❌ Erro na geração (solver): {e}")
             return f"Erro ao gerar resposta: {str(e)}"
